@@ -55,27 +55,34 @@
   "eq.mic": {
     "icon": "󰅬",
     "label": "Clean Mic (RNNoise)",
-    "description": "Noise-suppressed capture chain",
-    "action": "omarchy-eq mic enable",
+    "description": "Toggle the noise-suppressed capture chain",
+    "action": "omarchy-eq mic toggle",
     "checked": "pactl list short sources | grep -q omarchy_mic_clean"
   },
   "eq.curve": {
     "icon": "󰃃",
     "label": "Curve & Profiles",
     "description": "Measured response, EQ curves and live switching",
-    "action": "omarchy-launch-tui 'omarchy-eq-term tui'",
+    "action": "omarchy-launch-tui omarchy-eq-term tui",
     "when": "omarchy-eq ab list >/dev/null 2>&1"
   },
   "eq.measure": {
     "icon": "󰄨",
     "label": "Re-measure Speakers",
     "description": "Two-position measurement, then rebuild (~7 min, audible)",
-    "action": "omarchy-launch-tui 'omarchy-eq-term calibrate'"
+    "action": "omarchy-launch-tui omarchy-eq-term calibrate"
   },
   "eq.doctor": {
     "icon": "󰒡",
     "label": "Audio Diagnostics",
     "description": "Show audio state and diagnose problems",
-    "action": "omarchy-launch-tui 'omarchy-eq-term doctor'"
+    "action": "omarchy-launch-tui omarchy-eq-term doctor"
+  },
+  "eq.reset": {
+    "icon": "󰜺",
+    "label": "Remove EQ",
+    "description": "Delete the profiles and restore raw output",
+    "action": "omarchy-launch-tui omarchy-eq-term reset",
+    "when": "omarchy-eq ab list >/dev/null 2>&1"
   }
 }

@@ -369,10 +369,18 @@ cmd_export() {
 cmd_mic() {
   need_pa
   local plugin=/usr/lib/ladspa/librnnoise_ladspa.so
-  case "${1:-enable}" in
+  local action="${1:-enable}"
+  if [[ $action == toggle ]]; then
+    if pactl list short sources 2>/dev/null | grep -q omarchy_mic_clean; then
+      action=disable
+    else
+      action=enable
+    fi
+  fi
+  case "$action" in
     disable) rm -f "$MIC_CONF"; restart_pw; info "mic chain removed"; return ;;
     enable)  ;;
-    *) die "usage: omarchy-eq mic [enable|disable]" ;;
+    *) die "usage: omarchy-eq mic [enable|disable|toggle]" ;;
   esac
   [[ -f $plugin ]] || die "RNNoise LADSPA plugin not found at $plugin (install: noise-suppression-for-voice)"
   local source; source=$(detect_source); [[ -n $source ]] || die "no capture source found"
@@ -495,7 +503,7 @@ omarchy-eq $VERSION -- measure, correct and A/B laptop speaker EQ
   omarchy-eq tui                curve + profile switcher in the terminal
   omarchy-eq import <file.txt>  import an Equalizer APO / AutoEQ preset
   omarchy-eq export             print the measured curve as plain text
-  omarchy-eq mic [enable|disable]   RNNoise capture chain
+  omarchy-eq mic [enable|disable|toggle]  RNNoise capture chain
   omarchy-eq doctor             show audio state and diagnose problems
   omarchy-eq reset              remove everything, restore raw output
 
