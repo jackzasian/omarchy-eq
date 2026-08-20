@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# omarchy-eq -- measure your laptop speakers, generate EQ from the measurement,
+# and A/B the results live. See README.md.
+set -uo pipefail
+
+VERSION="1.0.0"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(dirname "$(dirname "$SELF")")"
+LIB="$ROOT/lib"
+[[ -d $LIB ]] || LIB="/usr/share/omarchy-eq/lib"
+
+STATE="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-eq"
+CONFD="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d"
+EQ_CONF="$CONFD/99-omarchy-eq.conf"
+MIC_CONF="$CONFD/98-omarchy-mic.conf"
+RESPONSE="$STATE/response.txt"
+PROFILES="$STATE/profiles.json"
+FREQS=(50 63 80 100 125 160 200 250 315 400 500 630 800 1000 1250 1600
+       2000 2500 3150 4000 5000 6300 8000 10000 12500 16000)
+
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m::\033[0m %s\n' "$*"; }
+warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
+need() { command -v "$1" >/dev/null || die "missing required command: $1"; }
+
+# ---- device detection -------------------------------------------------------
+# Prefer the built-in PCI codec; USB/BT devices are not what we want to EQ.
+detect_sink() {
+  local s
+  s=$(pactl list short sinks 2>/dev/null | awk '$2 ~ /^alsa_output\.pci/ {print $2; exit}')
+  [[ -z $s ]] && s=$(pactl list short sinks 2>/dev/null | awk '$2 ~ /^alsa_output\./ {print $2; exit}')
+  echo "$s"
+}
+detect_source() {
+  local s
+  s=$(pactl list short sources 2>/dev/null | awk '$2 ~ /^alsa_input\.pci/ {print $2; exit}')
+  [[ -z $s ]] && s=$(pactl list short sources 2>/dev/null | awk '$2 ~ /^alsa_input\./ {print $2; exit}')
+  echo "$s"
+}
+restart_pw() {
+  systemctl --user restart pipewire wireplumber pipewire-pulse 2>/dev/null
+  sleep 2.5
+  systemctl --user is-active pipewire >/dev/null || die "pipewire failed to restart -- run: omarchy-eq reset"
+}
+
+tone_wav() { # freq path [seconds] [amplitude]
+  python3 - "$2" "$1" "${3:-1.6}" "${4:-0.1}" <<'PY'
+import sys, struct, math, wave
+path, f, dur, amp = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+sr = 48000
+w = wave.open(path, 'wb'); w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr)
+w.writeframes(b''.join(struct.pack('<hh', *((int(amp*32767*math.sin(2*math.pi*f*i/sr)),)*2))
+                       for i in range(int(sr*dur))))
+w.close()
+PY
+}
+
+# ---- commands ---------------------------------------------------------------
+cmd_measure() {
+  need pactl; need pw-play; need pw-record; need python3
+  local sink source vol=60
+  sink=$(detect_sink); source=$(detect_source)
+  [[ -n $sink   ]] || die "no built-in analog sink found"
+  [[ -n $source ]] || die "no built-in analog capture source found -- measurement needs the internal mic"
+
+  mkdir -p "$STATE"; local tmp; tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' RETURN
+
+  info "sink   : $sink"
+  info "source : $source"
+  cat <<EOF
+
+  This plays ${#FREQS[@]} test tones through your speakers and records them on the
+  internal mic. It takes about $(( ${#FREQS[@]} * 2 )) seconds and will be audible.
+
+  For a usable measurement: quiet room, laptop on a hard flat surface,
+  lid at normal viewing angle, and do not type while it runs.
+
+EOF
+  read -rp "  Press Enter to start, Ctrl-C to abort. " _
+
+  pactl set-sink-mute "$sink" 0 >/dev/null 2>&1
+  pactl set-sink-volume "$sink" "${vol}%" >/dev/null 2>&1
+  pactl set-source-mute "$source" 0 >/dev/null 2>&1
+  : > "$RESPONSE"
+  echo "# omarchy-eq response measurement -- $(date -Is)" >> "$RESPONSE"
+  echo "# sink=$sink source=$source volume=${vol}%" >> "$RESPONSE"
+
+  for f in "${FREQS[@]}"; do
+    tone_wav "$f" "$tmp/t.wav"
+    pw-play --target="$sink" "$tmp/t.wav" >/dev/null 2>&1 &
+    local pid=$!
+    sleep 0.55
+    timeout -s INT 1.1 pw-record --target="$source" "$tmp/r.wav" >/dev/null 2>&1
+    wait $pid 2>/dev/null
+    local db; db=$(python3 "$LIB/analyze.py" tone "$tmp/r.wav" "$f" 2>/dev/null || echo "-120")
+    printf '%s %s\n' "$f" "$db" >> "$RESPONSE"
+    printf '  %6s Hz  %8s dB\n' "$f" "$db"
+  done
+  info "written: $RESPONSE"
+  info "next   : omarchy-eq generate"
+}
+
+cmd_generate() {
+  [[ -f $RESPONSE ]] || die "no measurement found -- run: omarchy-eq measure"
+  mkdir -p "$STATE"
+  python3 "$LIB/generate.py" "$RESPONSE" "$PROFILES" || die "generation failed"
+  info "written: $PROFILES"
+  info "next   : omarchy-eq apply"
+}
+
+cmd_apply() {
+  [[ -f $PROFILES ]] || die "no profiles -- run: omarchy-eq generate"
+  local sink; sink=$(detect_sink); [[ -n $sink ]] || die "no built-in sink found"
+  mkdir -p "$CONFD"
+  python3 "$LIB/render.py" "$PROFILES" "$sink" > "$EQ_CONF" || die "render failed"
+  info "installed: $EQ_CONF"
+  restart_pw
+  info "profiles now available:"
+  pactl list short sinks | awk '$2 ~ /^eq_/ {printf "    %s\n", $2}'
+  info "switch with: omarchy-eq ab <profile>   (or just: omarchy-eq ab)"
+}
+
+cmd_mic() {
+  local plugin=/usr/lib/ladspa/librnnoise_ladspa.so
+  case "${1:-enable}" in
+    disable) rm -f "$MIC_CONF"; restart_pw; info "mic chain removed"; return ;;
+    enable)  ;;
+    *) die "usage: omarchy-eq mic [enable|disable]" ;;
+  esac
+  [[ -f $plugin ]] || die "RNNoise LADSPA plugin not found at $plugin (install: noise-suppression-for-voice)"
+  local source; source=$(detect_source); [[ -n $source ]] || die "no capture source found"
+  mkdir -p "$CONFD"
+  sed -e "s#@PLUGIN@#$plugin#" -e "s#@SOURCE@#$source#" -e "s#@VAD@#50.0#" \
+      "$LIB/mic.conf.tmpl" > "$MIC_CONF"
+  info "installed: $MIC_CONF"
+  restart_pw
+  if pactl list short sources | grep -q omarchy_mic_clean; then
+    pactl set-default-source omarchy_mic_clean >/dev/null 2>&1
+    info "default input -> Microphone (Clean)"
+  else
+    warn "mic chain did not appear; check: journalctl --user -u pipewire -n 30"
+  fi
+}
+
+cmd_ab() {
+  [[ -f $PROFILES ]] || die "no profiles -- run: omarchy-eq generate && omarchy-eq apply"
+  local raw; raw=$(detect_sink)
+  mapfile -t keys < <(python3 -c "import json;print('\n'.join(json.load(open('$PROFILES'))['profiles']))")
+  local order=(flat "${keys[@]}")
+  declare -A SINK DESC
+  SINK[flat]="$raw"; DESC[flat]="no EQ - raw speakers (reference)"
+  local k
+  for k in "${keys[@]}"; do
+    SINK[$k]="eq_$k"
+    DESC[$k]=$(python3 -c "
+import json;p=json.load(open('$PROFILES'))['profiles']['$k']
+print(p['description']+' | '+' '.join('%s%g@%g'%('+' if f['control'].get('Gain',0)>0 else '',f['control'].get('Gain',0),f['control']['Freq']) if 'Gain' in f['control'] else 'HPF%gHz'%f['control']['Freq'] for f in p['filters']))")
+  done
+
+  current() { local d; d=$(pactl get-default-sink 2>/dev/null)
+              for k in "${order[@]}"; do [[ ${SINK[$k]} == "$d" ]] && { echo "$k"; return; }; done; echo unknown; }
+
+  local target
+  case "${1:-cycle}" in
+    status) k=$(current); printf 'active: %s\n  %s\n' "$k" "${DESC[$k]:-unknown}"; return ;;
+    list)   for k in "${order[@]}"; do printf '  %-10s %s\n' "$k" "${DESC[$k]}"; done; return ;;
+    cycle)  local c n=0; c=$(current)
+            for i in "${!order[@]}"; do [[ ${order[$i]} == "$c" ]] && n=$(( (i+1) % ${#order[@]} )); done
+            target=${order[$n]} ;;
+    *)      target="$1"; [[ -n ${SINK[$target]:-} ]] || die "unknown profile '$target' (have: ${order[*]})" ;;
+  esac
+
+  pactl set-default-sink "${SINK[$target]}" >/dev/null 2>&1
+  # Move only real application streams. Rows with client "-" are the filter
+  # chains' own outputs; moving those chains the EQs into each other.
+  while read -r id _sink client _rest; do
+    [[ -n $id && $client != "-" ]] && pactl move-sink-input "$id" "${SINK[$target]}" >/dev/null 2>&1
+  done < <(pactl list short sink-inputs 2>/dev/null)
+
+  printf '\n  \033[1m▶ %s\033[0m\n    %s\n\n' "${target^^}" "${DESC[$target]}"
+  command -v notify-send >/dev/null && notify-send -t 1500 "Speaker EQ: ${target^^}" "${DESC[$target]}" 2>/dev/null
+  return 0
+}
+
+cmd_doctor() {
+  printf '\033[1momarchy-eq %s\033[0m\n\n' "$VERSION"
+  printf 'pipewire      : %s\n' "$(systemctl --user is-active pipewire 2>/dev/null)"
+  printf 'wireplumber   : %s\n' "$(systemctl --user is-active wireplumber 2>/dev/null)"
+  printf 'built-in sink : %s\n' "$(detect_sink)"
+  printf 'built-in src  : %s\n' "$(detect_source)"
+  printf 'default sink  : %s\n' "$(pactl get-default-sink 2>/dev/null)"
+  printf 'default src   : %s\n' "$(pactl get-default-source 2>/dev/null)"
+  printf 'measurement   : %s\n' "$([[ -f $RESPONSE ]] && echo "$RESPONSE" || echo '(none)')"
+  printf 'profiles      : %s\n' "$([[ -f $PROFILES ]] && echo "$PROFILES" || echo '(none)')"
+  printf 'eq config     : %s\n' "$([[ -f $EQ_CONF ]] && echo "$EQ_CONF" || echo '(not applied)')"
+  printf 'mic config    : %s\n' "$([[ -f $MIC_CONF ]] && echo "$MIC_CONF" || echo '(not applied)')"
+  printf 'rnnoise       : %s\n' "$([[ -f /usr/lib/ladspa/librnnoise_ladspa.so ]] && echo present || echo 'missing (noise-suppression-for-voice)')"
+  echo
+  echo 'filter chains (should all target the hardware sink):'
+  pactl list short sink-inputs 2>/dev/null | while read -r id sink client _; do
+    [[ $client == "-" ]] || continue
+    printf '  %-5s -> %s\n' "$id" "$(pactl list short sinks | awk -v d="$sink" '$1==d{print $2}')"
+  done
+}
+
+cmd_reset() {
+  rm -f "$EQ_CONF" "$MIC_CONF"
+  info "removed EQ and mic configs"
+  local raw; raw=$(detect_sink)
+  restart_pw
+  [[ -n $raw ]] && pactl set-default-sink "$raw" >/dev/null 2>&1
+  info "restored raw output: $raw"
+}
+
+usage() {
+  cat <<EOF
+omarchy-eq $VERSION -- measure, correct and A/B laptop speaker EQ
+
+  omarchy-eq measure            play test tones, record on the internal mic
+  omarchy-eq generate           derive EQ profiles from the measurement
+  omarchy-eq apply              install the profiles as PipeWire sinks
+  omarchy-eq ab [profile]       switch profile live (no arg = cycle)
+  omarchy-eq ab list|status     show profiles / what is active
+  omarchy-eq mic [enable|disable]   RNNoise capture chain
+  omarchy-eq doctor             show audio state and diagnose problems
+  omarchy-eq reset              remove everything, restore raw output
+
+First run:  omarchy-eq measure && omarchy-eq generate && omarchy-eq apply
+EOF
+}
+
+case "${1:-help}" in
+  measure)  shift; cmd_measure "$@" ;;
+  generate) shift; cmd_generate "$@" ;;
+  apply)    shift; cmd_apply "$@" ;;
+  ab)       shift; cmd_ab "$@" ;;
+  mic)      shift; cmd_mic "$@" ;;
+  doctor)   shift; cmd_doctor "$@" ;;
+  reset)    shift; cmd_reset "$@" ;;
+  -v|--version) echo "$VERSION" ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac
