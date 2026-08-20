@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Terminal wrapper for omarchy-eq actions launched from the Omarchy menu,
+# which needs a TTY for the measure prompt and holds output open afterwards.
+#
+# Named -term, not -tui: `omarchy-eq tui` is the actual interactive UI. This is
+# just a launcher shim.
+set -uo pipefail
+case "${1:-doctor}" in
+  measure) omarchy-eq measure && omarchy-eq measure --again \
+             && omarchy-eq generate && omarchy-eq apply ;;
+  tui)     omarchy-eq tui; exit 0 ;;
+  doctor)  omarchy-eq doctor ;;
+  reset)   omarchy-eq reset ;;
+  *)       echo "usage: omarchy-eq-term {measure|tui|doctor|reset}" ;;
+esac
+echo
+read -n1 -r -p "Press any key to close… "

@@ -19,7 +19,7 @@
     "label": "Cycle Profile",
     "description": "Next EQ profile (also Super+Alt+E)",
     "action": "omarchy-eq ab",
-    "when": "test -f $HOME/.local/share/omarchy-eq/profiles.json"
+    "when": "omarchy-eq ab list >/dev/null 2>&1"
   },
   "eq.flat": {
     "icon": "󰇟",
@@ -33,7 +33,7 @@
     "label": "Balanced",
     "description": "Measured correction - general use",
     "action": "omarchy-eq ab balanced",
-    "when": "test -f $HOME/.local/share/omarchy-eq/profiles.json",
+    "when": "omarchy-eq ab list >/dev/null 2>&1",
     "checked": "pactl get-default-sink | grep -qx eq_balanced"
   },
   "eq.voice": {
@@ -41,7 +41,7 @@
     "label": "Voice",
     "description": "Calls and video - forward speech",
     "action": "omarchy-eq ab voice",
-    "when": "test -f $HOME/.local/share/omarchy-eq/profiles.json",
+    "when": "omarchy-eq ab list >/dev/null 2>&1",
     "checked": "pactl get-default-sink | grep -qx eq_voice"
   },
   "eq.music": {
@@ -49,7 +49,7 @@
     "label": "Music",
     "description": "Keeps low-mid warmth, adds air",
     "action": "omarchy-eq ab music",
-    "when": "test -f $HOME/.local/share/omarchy-eq/profiles.json",
+    "when": "omarchy-eq ab list >/dev/null 2>&1",
     "checked": "pactl get-default-sink | grep -qx eq_music"
   },
   "eq.mic": {
@@ -59,16 +59,23 @@
     "action": "omarchy-eq mic enable",
     "checked": "pactl list short sources | grep -q omarchy_mic_clean"
   },
+  "eq.curve": {
+    "icon": "󰃃",
+    "label": "Curve & Profiles",
+    "description": "Measured response, EQ curves and live switching",
+    "action": "omarchy-launch-tui 'omarchy-eq-term tui'",
+    "when": "omarchy-eq ab list >/dev/null 2>&1"
+  },
   "eq.measure": {
     "icon": "󰄨",
     "label": "Re-measure Speakers",
-    "description": "Play test tones and rebuild profiles (~60s, audible)",
-    "action": "omarchy-launch-tui 'omarchy-eq-tui measure'"
+    "description": "Two-position measurement, then rebuild (~7 min, audible)",
+    "action": "omarchy-launch-tui 'omarchy-eq-term calibrate'"
   },
   "eq.doctor": {
     "icon": "󰒡",
     "label": "Audio Diagnostics",
     "description": "Show audio state and diagnose problems",
-    "action": "omarchy-launch-tui 'omarchy-eq-tui doctor'"
+    "action": "omarchy-launch-tui 'omarchy-eq-term doctor'"
   }
 }
