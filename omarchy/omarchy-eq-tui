@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Terminal wrapper for omarchy-eq actions launched from the Omarchy menu,
+# which needs a TTY for the measure prompt and holds output open afterwards.
+set -uo pipefail
+case "${1:-doctor}" in
+  measure) omarchy-eq measure && omarchy-eq generate && omarchy-eq apply ;;
+  doctor)  omarchy-eq doctor ;;
+  reset)   omarchy-eq reset ;;
+  *)       echo "usage: omarchy-eq-tui {measure|doctor|reset}" ;;
+esac
+echo
+read -n1 -r -p "Press any key to close… "

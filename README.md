@@ -52,6 +52,32 @@ notification naming the active profile and its curve.
 | `omarchy-eq doctor` | audio state + diagnosis |
 | `omarchy-eq reset` | remove everything, restore raw output |
 
+## Omarchy integration
+
+On [Omarchy](https://omarchy.org), `omarchy-eq` can live in the Super+Space menu
+and on a hotkey. Files are in [`omarchy/`](omarchy/).
+
+**Menu.** Merge [`omarchy/omarchy-menu.jsonc`](omarchy/omarchy-menu.jsonc) into
+`~/.config/omarchy/extensions/omarchy-menu.jsonc` (it hot-reloads on save). This
+adds a **Speaker EQ** submenu listing every profile, plus the clean-mic toggle,
+re-measure and diagnostics. Two niceties come from the menu format itself:
+
+- `"checked"` puts a checkmark on the profile that is **currently active**
+- `"when"` hides the profile rows until a measurement actually exists
+
+Terminal-based rows go through [`omarchy/omarchy-eq-tui`](omarchy/omarchy-eq-tui)
+— copy it to `~/.local/bin/`. It exists so `measure` gets a real TTY for its
+prompt and holds output open afterwards.
+
+**Hotkey.** Add [`omarchy/bindings.lua.snippet`](omarchy/bindings.lua.snippet)
+to `~/.config/hypr/bindings.lua` for `SUPER+ALT+E` to cycle profiles. Check the
+key is free first with `omarchy menu keybindings --print`, and if it is taken,
+`hl.unbind` it before rebinding.
+
+If you write your own menu icons, use **literal glyphs** rather than `\uXXXX`
+escapes. Nerd Font icons are outside the BMP, so an escape needs a correct
+surrogate pair and a wrong one is easy to write and awkward to spot.
+
 ## Profiles
 
 Three are generated from one measurement:

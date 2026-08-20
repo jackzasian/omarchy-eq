@@ -22,6 +22,14 @@ die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m::\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
 need() { command -v "$1" >/dev/null || die "missing required command: $1"; }
+# pactl fails with "Connection refused" when XDG_RUNTIME_DIR is unset (e.g. a
+# sanitised env). Without this guard `ab` would silently read an empty default
+# sink, decide the current profile is unknown, and jump to the first profile
+# instead of advancing.
+need_pa() {
+  pactl info >/dev/null 2>&1 || \
+    die "cannot reach PipeWire via pactl (is XDG_RUNTIME_DIR set?)"
+}
 
 # ---- device detection -------------------------------------------------------
 # Prefer the built-in PCI codec; USB/BT devices are not what we want to EQ.
@@ -57,7 +65,7 @@ PY
 
 # ---- commands ---------------------------------------------------------------
 cmd_measure() {
-  need pactl; need pw-play; need pw-record; need python3
+  need pactl; need pw-play; need pw-record; need python3; need_pa
   local sink source vol=60
   sink=$(detect_sink); source=$(detect_source)
   [[ -n $sink   ]] || die "no built-in analog sink found"
@@ -110,6 +118,7 @@ cmd_generate() {
 }
 
 cmd_apply() {
+  need_pa
   [[ -f $PROFILES ]] || die "no profiles -- run: omarchy-eq generate"
   local sink; sink=$(detect_sink); [[ -n $sink ]] || die "no built-in sink found"
   mkdir -p "$CONFD"
@@ -122,6 +131,7 @@ cmd_apply() {
 }
 
 cmd_mic() {
+  need_pa
   local plugin=/usr/lib/ladspa/librnnoise_ladspa.so
   case "${1:-enable}" in
     disable) rm -f "$MIC_CONF"; restart_pw; info "mic chain removed"; return ;;
@@ -144,6 +154,7 @@ cmd_mic() {
 }
 
 cmd_ab() {
+  need_pa
   [[ -f $PROFILES ]] || die "no profiles -- run: omarchy-eq generate && omarchy-eq apply"
   local raw; raw=$(detect_sink)
   mapfile -t keys < <(python3 -c "import json;print('\n'.join(json.load(open('$PROFILES'))['profiles']))")

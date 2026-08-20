@@ -1,0 +1,7 @@
+-- Add to ~/.config/hypr/bindings.lua
+-- Cycles flat -> balanced -> voice -> music, moving whatever is already
+-- playing, so profiles can be compared mid-song.
+--
+-- Check the key is free first:  omarchy menu keybindings --print
+-- If it is already bound, call hl.unbind("SUPER + ALT + E") on the line above.
+o.bind("SUPER + ALT + E", "Cycle speaker EQ", "omarchy-eq ab")

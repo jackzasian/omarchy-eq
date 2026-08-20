@@ -1,0 +1,74 @@
+// omarchy-eq entries for the Omarchy menu (Super+Space).
+// Merge into ~/.config/omarchy/extensions/omarchy-menu.jsonc
+// "when"    hides profile rows until a measurement exists.
+// "checked" marks the profile that is currently active.
+{
+  "eq": {
+    "icon": "󰃃",
+    "label": "Speaker EQ",
+    "aliases": [
+      "audio",
+      "sound",
+      "equalizer",
+      "speakers"
+    ],
+    "description": "Measured speaker EQ profiles and clean mic"
+  },
+  "eq.cycle": {
+    "icon": "󰁖",
+    "label": "Cycle Profile",
+    "description": "Next EQ profile (also Super+Alt+E)",
+    "action": "omarchy-eq ab",
+    "when": "test -f $HOME/.local/share/omarchy-eq/profiles.json"
+  },
+  "eq.flat": {
+    "icon": "󰇟",
+    "label": "Flat",
+    "description": "No EQ - raw speakers, the reference",
+    "action": "omarchy-eq ab flat",
+    "checked": "pactl get-default-sink | grep -q '^alsa_output'"
+  },
+  "eq.balanced": {
+    "icon": "󰋋",
+    "label": "Balanced",
+    "description": "Measured correction - general use",
+    "action": "omarchy-eq ab balanced",
+    "when": "test -f $HOME/.local/share/omarchy-eq/profiles.json",
+    "checked": "pactl get-default-sink | grep -qx eq_balanced"
+  },
+  "eq.voice": {
+    "icon": "󱀄",
+    "label": "Voice",
+    "description": "Calls and video - forward speech",
+    "action": "omarchy-eq ab voice",
+    "when": "test -f $HOME/.local/share/omarchy-eq/profiles.json",
+    "checked": "pactl get-default-sink | grep -qx eq_voice"
+  },
+  "eq.music": {
+    "icon": "󰔞",
+    "label": "Music",
+    "description": "Keeps low-mid warmth, adds air",
+    "action": "omarchy-eq ab music",
+    "when": "test -f $HOME/.local/share/omarchy-eq/profiles.json",
+    "checked": "pactl get-default-sink | grep -qx eq_music"
+  },
+  "eq.mic": {
+    "icon": "󰅬",
+    "label": "Clean Mic (RNNoise)",
+    "description": "Noise-suppressed capture chain",
+    "action": "omarchy-eq mic enable",
+    "checked": "pactl list short sources | grep -q omarchy_mic_clean"
+  },
+  "eq.measure": {
+    "icon": "󰄨",
+    "label": "Re-measure Speakers",
+    "description": "Play test tones and rebuild profiles (~60s, audible)",
+    "action": "omarchy-launch-tui 'omarchy-eq-tui measure'"
+  },
+  "eq.doctor": {
+    "icon": "󰒡",
+    "label": "Audio Diagnostics",
+    "description": "Show audio state and diagnose problems",
+    "action": "omarchy-launch-tui 'omarchy-eq-tui doctor'"
+  }
+}
