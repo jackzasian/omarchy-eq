@@ -16,10 +16,11 @@ on any modern Linux desktop.
 
 ```bash
 git clone https://github.com/jackzasian/omarchy-eq
-cd omarchy-eq && ./install.sh
+cd omarchy-eq && ./install.sh --omarchy
 ```
 
 No root required. Everything lives under `~/.local` and `~/.config/pipewire`.
+Drop `--omarchy` if you are not on Omarchy. An Arch `PKGBUILD` is included.
 
 **Requires** PipeWire + `pactl`, and `python3` (stdlib only — no numpy/scipy).
 The optional mic chain needs `noise-suppression-for-voice`.
@@ -27,9 +28,10 @@ The optional mic chain needs `noise-suppression-for-voice`.
 ## Use
 
 ```bash
-omarchy-eq measure     # play tones, record on the internal mic (~60s, audible)
-omarchy-eq generate    # derive EQ profiles from the measurement
-omarchy-eq apply       # install them as PipeWire sinks
+omarchy-eq measure          # play tones, record on the internal mic (~3 min, audible)
+omarchy-eq measure --again  # second position -- see below, this matters
+omarchy-eq generate         # derive EQ profiles from the measurement
+omarchy-eq apply            # install them as PipeWire sinks
 ```
 
 Then listen. All profiles load **at once** as separate sinks, so switching is
@@ -40,6 +42,7 @@ your memory of the previous one, which makes honest A/B impossible.
 omarchy-eq ab flat       # reference: no EQ
 omarchy-eq ab balanced   # switch, mid-song
 omarchy-eq ab            # cycle to the next profile
+omarchy-eq tui           # see the curve, switch profiles
 ```
 
 Bind `omarchy-eq ab` to a key for one-handed comparison. Each switch shows a
@@ -48,26 +51,88 @@ notification naming the active profile and its curve.
 | Command | |
 |---|---|
 | `omarchy-eq ab list\|status` | show profiles / what's active |
+| `omarchy-eq tui` | measured curve + EQ curve + profile switcher |
+| `omarchy-eq import <file.txt>` | import an Equalizer APO / AutoEQ preset |
+| `omarchy-eq export` | print the measured curve as plain text |
 | `omarchy-eq mic enable\|disable` | RNNoise capture chain |
 | `omarchy-eq doctor` | audio state + diagnosis |
 | `omarchy-eq reset` | remove everything, restore raw output |
 
+## Why two measurements
+
+Measure once and you are not measuring your speaker. You are measuring
+**speaker × microphone × room geometry**, and nothing in a single pass can tell
+those apart.
+
+The dominant artifact is comb filtering: sound reaches the mic directly *and*
+after bouncing off the desk, and at frequencies where the two paths cancel you
+get a null 20 dB deep that has nothing to do with the driver. Correcting one is
+worse than doing nothing — it boosts a frequency the speaker reproduces fine.
+
+Three things push back on this:
+
+- **Warble tones.** Every test tone sweeps ±1/6 octave rather than sitting at one
+  frequency. A comb null is narrow and fixed; a tone that moves cannot fall
+  entirely into one.
+- **A noise floor pass.** Silence is recorded first, and any tone that fails to
+  rise 10 dB above the floor is marked *unknown* rather than recorded as a real
+  measurement of quietness.
+- **Two positions.** A comb null moves when the microphone moves. The driver does
+  not. So `measure --again` runs the whole sweep from a second position and keeps
+  only what both runs agree on — anything differing by more than 6 dB between
+  them is discarded as geometry.
+
+You can skip `--again`, and the tool will work. It will also tell you that every
+point is single-confidence, and it is more likely to hit its safety clamps.
+
+## What it will not do
+
+Corrections are clamped on purpose: highpass 80–300 Hz, cuts and boosts ≤6 dB,
+shelves ≤3 dB, and only 65 % of the measured deviation is applied. An
+uncalibrated near-field measurement systematically overstates deviation, and
+fully inverting it produces a harsh, over-EQ'd result. If a parameter lands on
+its clamp, `generate` says so — that is the measurement telling you it ran off
+the end of what this tool will attempt.
+
+It also refuses to correct above 8 kHz when the measurement reads *hotter* there
+than the midband. No small sealed driver is brighter than its own midrange, so
+that reading is the microphone's own resonance, and "correcting" it would cut
+real treble.
+
+## Importing headphone presets
+
+```bash
+omarchy-eq import ~/Downloads/HD650\ ParametricEQ.txt
+omarchy-eq apply
+```
+
+Equalizer APO / [AutoEQ](https://autoeq.app) parametric presets map onto the same
+biquads PipeWire already implements, so an import is exact — no resampling and no
+approximation. `Preamp:` becomes a real broadband gain stage. Download the
+**ParametricEQ** variant; fixed-band `GraphicEQ` files are not parametric and are
+rejected with a message saying so.
+
+Imported profiles survive `omarchy-eq generate`.
+
 ## Omarchy integration
 
-On [Omarchy](https://omarchy.org), `omarchy-eq` can live in the Super+Space menu
-and on a hotkey. Files are in [`omarchy/`](omarchy/).
+`./install.sh --omarchy` installs the terminal shim and, if you have no menu
+extension yet, the menu file. Omarchy reads a single user-owned menu file, so if
+you already have one the installer prints what to merge rather than rewriting it.
 
-**Menu.** Merge [`omarchy/omarchy-menu.jsonc`](omarchy/omarchy-menu.jsonc) into
+**Menu.** [`omarchy/omarchy-menu.jsonc`](omarchy/omarchy-menu.jsonc) merges into
 `~/.config/omarchy/extensions/omarchy-menu.jsonc` (it hot-reloads on save). This
 adds a **Speaker EQ** submenu listing every profile, plus the clean-mic toggle,
-re-measure and diagnostics. Two niceties come from the menu format itself:
+the curve view, re-measure and diagnostics. Two niceties come from the menu
+format itself:
 
 - `"checked"` puts a checkmark on the profile that is **currently active**
 - `"when"` hides the profile rows until a measurement actually exists
 
-Terminal-based rows go through [`omarchy/omarchy-eq-tui`](omarchy/omarchy-eq-tui)
-— copy it to `~/.local/bin/`. It exists so `measure` gets a real TTY for its
-prompt and holds output open afterwards.
+Terminal rows go through [`omarchy/omarchy-eq-term`](omarchy/omarchy-eq-term),
+which exists so `measure` gets a real TTY for its prompt and holds output open
+afterwards. (It was called `omarchy-eq-tui` before `omarchy-eq tui` became the
+actual interactive UI.)
 
 **Hotkey.** Add [`omarchy/bindings.lua.snippet`](omarchy/bindings.lua.snippet)
 to `~/.config/hypr/bindings.lua` for `SUPER+ALT+E` to cycle profiles. Check the
@@ -78,68 +143,25 @@ If you write your own menu icons, use **literal glyphs** rather than `\uXXXX`
 escapes. Nerd Font icons are outside the BMP, so an escape needs a correct
 surrogate pair and a wrong one is easy to write and awkward to spot.
 
-## Profiles
+## Where things live
 
-Three are generated from one measurement:
+```
+~/.local/state/omarchy-eq/devices/<sink>/response.json   measurements
+~/.local/state/omarchy-eq/devices/<sink>/profiles.json   derived + imported
+~/.config/pipewire/pipewire.conf.d/99-omarchy-eq.conf    generated, do not edit
+```
 
-- **balanced** — the measured correction, for general use
-- **voice** — calls and video: higher high-pass, more presence
-- **music** — keeps low-mid warmth, adds air
+State is keyed by output device, and lives under `XDG_STATE_HOME` — separate from
+the installed library. Measurements from before v2 migrate automatically.
 
-## How it measures
+## Development
 
-A stepped sine sweep, 50 Hz–16 kHz at 1/3-octave spacing, analysed with a
-[Goertzel filter](https://en.wikipedia.org/wiki/Goertzel_algorithm) rather than
-an FFT. Goertzel evaluates a single known bin in O(n) with no dependencies, and
-rejects broadband room noise far better than a plain RMS reading — which matters
-because the microphone is centimetres from the speaker in a noisy chassis.
+```bash
+python -m unittest discover -s tests -t tests
+```
 
-## How it derives EQ — and what it deliberately won't do
-
-**It does not invert the measured curve.** A single-position, near-field
-measurement taken with an uncalibrated mic inside the chassis is full of sharp
-nulls from comb filtering and mic placement. Those move if you tilt the lid.
-Inverting them means trying to fill a 30 dB hole that isn't really there, which
-sounds far worse than no EQ at all.
-
-So the tool corrects only broad, physically plausible trends:
-
-1. **Smooth** the curve over ~1 octave — wide enough to reject single-point
-   artifacts, narrow enough not to smear a real resonance.
-2. **Reject nulls** when computing band levels. Nulls are sharp *downward*
-   excursions, so the lowest 40% of points in a band are discarded before
-   averaging. Without this the midband reference gets dragged down and every
-   correction is inflated to its clamp.
-3. **Partial correction** (65%). Near-field measurement systematically
-   overstates deviation; room-correction software applies the same discount.
-4. **Clamp** everything: high-pass 80–300 Hz, cuts and boosts ≤6 dB, shelf ≤3 dB.
-
-The high-pass is the biggest single win. Content below the driver's usable range
-produces no audible output but still consumes excursion and amplifier headroom,
-so removing it cleans up everything above it.
-
-## Caveats
-
-The measurement is **relative, not calibrated**. It captures the speaker, the
-chassis, the mic's own response and the path between them, all at once. It is
-good enough to find your rolloff point and gross resonances — which is what EQ
-needs — and not good enough to publish as a frequency response plot.
-
-Results depend on the surface the laptop sits on and the lid angle. Measure in
-the position you actually use.
-
-## Notes for hacking on it
-
-Two things that cost me real debugging time, documented so they don't cost you any:
-
-- **LADSPA ports are `Input`/`Output`; PipeWire's builtin biquads use `In`/`Out`.**
-  Mixing them up makes the pipewire daemon abort at startup and crash-loop into
-  systemd's rate limit.
-- **Filter-chain outputs must be pinned** with `target.object` +
-  `node.dont-reconnect`. Otherwise WirePlumber re-routes each chain to whatever
-  the current default sink is — which chains the EQs into each other as soon as
-  one becomes the default.
-
-## License
-
-MIT
+No test dependencies; the suite is stdlib `unittest`, same as the library. The
+interesting tests are the ones pinning down *why* the code is shaped the way it
+is — that `goertzel` badly underreads a warble (which is why `band_level` exists),
+that the music profile can never end up less airy than balanced, and that a
+measurement disagreeing between positions gets thrown away.

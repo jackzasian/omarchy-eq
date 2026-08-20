@@ -1,14 +1,39 @@
 #!/usr/bin/env python3
 """Signal analysis for omarchy-eq. Pure stdlib - no numpy/scipy required.
 
-Goertzel is used instead of a full FFT because we only ever need the magnitude
-at one known tone frequency, and it rejects broadband room noise far better
-than a plain RMS measurement.
+Two ways to measure the level of a test tone:
+
+  goertzel  single-bin DFT. Exact for a *pure* sine, and it rejects broadband
+            noise far better than plain RMS. Kept for the `tone` mode.
+
+  band      cascaded bandpass then RMS, for *warble* tones. A warble spreads
+            its energy over a 1/3-octave span, which is the whole point -- a
+            comb-filter null is narrow, so a swept tone cannot be annihilated
+            by one. But that also means a single Goertzel bin no longer sees
+            most of the energy. Summing bins is not viable either: a
+            1/3-octave band at 16 kHz spans ~4000 DFT bins and each Goertzel
+            is O(n). Filtering once is O(n) for the entire band.
+
+Both return dBFS, but on *different references*: goertzel reports the tone's
+peak amplitude, band_level reports RMS. For a sine those differ by 3.01 dB. That
+is harmless because the derivation only ever looks at the shape of one curve
+measured one way -- but never mix the two within a single measurement.
 """
 import math
 import struct
 import sys
 import wave
+
+import biquad
+
+# Warble spans +/-1/6 octave. Q=2.0 is a little wider than that, so the sweep
+# edges are only ~0.8 dB down; two stages then buy ~26 dB of rejection a decade
+# away. The small edge loss is identical at every frequency, so it biases the
+# absolute level but not the *shape* of the measured response -- which is all
+# the derivation uses.
+BAND_Q = 2.0
+BAND_STAGES = 2
+WARBLE_OCT = 1.0 / 6.0
 
 
 def read_mono(path):
@@ -54,15 +79,43 @@ def goertzel(samples, sr, freq):
     return dbfs(math.sqrt(max(power, 0.0)) * 2 / n)
 
 
+def band_level(samples, sr, fc, q=BAND_Q, stages=BAND_STAGES, settle=0.05):
+    """dBFS of the energy in a ~1/3-octave band centred on `fc`.
+
+    `settle` discards the leading fraction of the filtered signal so the
+    biquads' startup transient does not count as signal. At the lowest
+    frequencies the transient is the longest, which is exactly where the
+    measurement is most fragile.
+    """
+    if not samples:
+        return -120.0
+    sig = samples
+    coeffs = biquad.design("bandpass", fc, sr, q)
+    for _ in range(max(1, stages)):
+        sig = biquad.process(coeffs, sig)
+    skip = int(len(sig) * settle)
+    return rms(sig[skip:] or sig)
+
+
 def main():
+    if len(sys.argv) < 3:
+        raise SystemExit(
+            "usage: analyze.py {tone <file> <hz>|band <file> <hz>|"
+            "floor <file> <hz>...|level <file>}")
     mode, path = sys.argv[1], sys.argv[2]
     samples, sr = read_mono(path)
     if mode == "tone":
         print("%.2f" % goertzel(samples, sr, float(sys.argv[3])))
+    elif mode == "band":
+        print("%.2f" % band_level(samples, sr, float(sys.argv[3])))
+    elif mode == "floor":
+        # Batch: one process measures the noise floor in every band at once.
+        for a in sys.argv[3:]:
+            print("%s %.2f" % (a, band_level(samples, sr, float(a))))
     elif mode == "level":
         print("%.2f %.2f" % (rms(samples), peak(samples)))
     else:
-        raise SystemExit("usage: analyze.py {tone <file> <hz>|level <file>}")
+        raise SystemExit("unknown mode: %s" % mode)
 
 
 if __name__ == "__main__":

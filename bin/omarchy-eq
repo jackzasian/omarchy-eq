@@ -3,20 +3,29 @@
 # and A/B the results live. See README.md.
 set -uo pipefail
 
-VERSION="1.0.0"
+VERSION="2.0.0"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(dirname "$(dirname "$SELF")")"
 LIB="$ROOT/lib"
-[[ -d $LIB ]] || LIB="/usr/share/omarchy-eq/lib"
+# Test for a real module, not just the directory: a system install puts the
+# binary in /usr/bin, which makes $ROOT/lib resolve to the very-much-existing
+# /usr/lib and would silently shadow the packaged library.
+[[ -f $LIB/generate.py ]] || LIB="/usr/share/omarchy-eq/lib"
+export PYTHONPATH="$LIB${PYTHONPATH:+:$PYTHONPATH}"
 
-STATE="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-eq"
 CONFD="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d"
 EQ_CONF="$CONFD/99-omarchy-eq.conf"
 MIC_CONF="$CONFD/98-omarchy-mic.conf"
-RESPONSE="$STATE/response.txt"
-PROFILES="$STATE/profiles.json"
+
+# 1/3-octave centres. Each tone warbles +/-1/6 octave, so the bands tile the
+# spectrum without gaps.
 FREQS=(50 63 80 100 125 160 200 250 315 400 500 630 800 1000 1250 1600
        2000 2500 3150 4000 5000 6300 8000 10000 12500 16000)
+
+REPEATS=3          # passes per frequency; the median of these is the reading
+TONE_SEC=1.4
+REC_SEC=1.0
+MEAS_VOL=60
 
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m::\033[0m %s\n' "$*"; }
@@ -30,6 +39,7 @@ need_pa() {
   pactl info >/dev/null 2>&1 || \
     die "cannot reach PipeWire via pactl (is XDG_RUNTIME_DIR set?)"
 }
+py() { python3 "$LIB/$@"; }
 
 # ---- device detection -------------------------------------------------------
 # Prefer the built-in PCI codec; USB/BT devices are not what we want to EQ.
@@ -45,89 +55,315 @@ detect_source() {
   [[ -z $s ]] && s=$(pactl list short sources 2>/dev/null | awk '$2 ~ /^alsa_input\./ {print $2; exit}')
   echo "$s"
 }
+
+# State lives per output device, under XDG_STATE_HOME. Resolve lazily: every
+# subcommand that touches state needs a sink name first.
+state_for() {
+  DEV_SINK="${1:-$(detect_sink)}"
+  [[ -n $DEV_SINK ]] || die "no built-in analog sink found"
+  RESPONSE=$(py state.py path response "$DEV_SINK") || die "cannot resolve state paths"
+  PROFILES=$(py state.py path profiles "$DEV_SINK") || die "cannot resolve state paths"
+  [[ -n $RESPONSE && -n $PROFILES ]] || die "cannot resolve state paths"
+  STATE_FALLBACK="$(dirname "$RESPONSE")/last-run.txt"
+  py state.py migrate "$DEV_SINK" 2>/dev/null | while read -r l; do info "$l"; done
+}
+
 restart_pw() {
   systemctl --user restart pipewire wireplumber pipewire-pulse 2>/dev/null
   sleep 2.5
   systemctl --user is-active pipewire >/dev/null || die "pipewire failed to restart -- run: omarchy-eq reset"
+  # Wait for the sinks to actually appear. Being "active" is not the same as
+  # having published nodes, and callers immediately ask for them by name.
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    pactl list short sinks 2>/dev/null | grep -q '^[0-9]' && break
+    sleep 0.4
+  done
 }
 
+# WirePlumber restores its own saved default sink asynchronously after a
+# restart, which silently overwrites a set-default-sink issued too early. Set,
+# verify, retry -- otherwise `apply && ab <profile>` lands on the wrong profile.
+set_default_verified() {
+  local want="$1" i
+  for i in 1 2 3 4 5 6; do
+    pactl set-default-sink "$want" >/dev/null 2>&1
+    sleep 0.3
+    [[ $(pactl get-default-sink 2>/dev/null) == "$want" ]] && return 0
+  done
+  return 1
+}
+
+# Warble tone: the centre frequency sweeps +/-1/6 octave at 5 Hz. A comb-filter
+# null is narrow and fixed, so it can swallow a pure sine whole -- that is what
+# produced the -68 dB at 80 Hz in the old measurements. A tone that moves cannot
+# be annihilated by one. Ends are faded to keep the click out of the band.
 tone_wav() { # freq path [seconds] [amplitude]
-  python3 - "$2" "$1" "${3:-1.6}" "${4:-0.1}" <<'PY'
+  python3 - "$2" "$1" "${3:-$TONE_SEC}" "${4:-0.1}" <<'PY'
 import sys, struct, math, wave
-path, f, dur, amp = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
-sr = 48000
+path, fc, dur, amp = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+sr, dev, rate = 48000, 1.0 / 6.0, 5.0
+n = int(sr * dur)
+fade = max(1, int(sr * 0.02))
+ph, out = 0.0, []
+for i in range(n):
+    f = fc * (2.0 ** (dev * math.sin(2 * math.pi * rate * i / sr)))
+    ph += 2 * math.pi * f / sr
+    g = 1.0
+    if i < fade:
+        g = 0.5 - 0.5 * math.cos(math.pi * i / fade)
+    elif i > n - fade:
+        g = 0.5 - 0.5 * math.cos(math.pi * (n - i) / fade)
+    s = int(amp * g * 32767 * math.sin(ph))
+    out.append(struct.pack('<hh', s, s))
 w = wave.open(path, 'wb'); w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr)
-w.writeframes(b''.join(struct.pack('<hh', *((int(amp*32767*math.sin(2*math.pi*f*i/sr)),)*2))
-                       for i in range(int(sr*dur))))
-w.close()
+w.writeframes(b''.join(out)); w.close()
 PY
+}
+
+# ---- audio state save/restore -----------------------------------------------
+# measure forces volume and unmutes. Restore on *any* exit, including Ctrl-C --
+# a long audible measurement is the thing users interrupt most.
+SAVED_SINK="" SAVED_VOL="" SAVED_MUTE="" SAVED_SRC="" SAVED_SRC_MUTE="" TMPDIR_M=""
+save_audio() {
+  SAVED_SINK="$1"; SAVED_SRC="$2"
+  # calibrate runs measure twice in one process. The second run must not "save"
+  # the 60% the first one set -- that would lose the real volume for good.
+  [[ -n $SAVED_VOL ]] && return 0
+  SAVED_VOL=$(pactl get-sink-volume "$1" 2>/dev/null | grep -o '[0-9]\+%' | head -1)
+  SAVED_MUTE=$(pactl get-sink-mute "$1" 2>/dev/null | awk '{print $2}')
+  SAVED_SRC_MUTE=$(pactl get-source-mute "$2" 2>/dev/null | awk '{print $2}')
+}
+restore_audio() {
+  [[ -n $SAVED_SINK && -n $SAVED_VOL ]] && \
+    pactl set-sink-volume "$SAVED_SINK" "$SAVED_VOL" >/dev/null 2>&1
+  [[ $SAVED_MUTE == yes ]] && pactl set-sink-mute "$SAVED_SINK" 1 >/dev/null 2>&1
+  [[ $SAVED_SRC_MUTE == yes ]] && pactl set-source-mute "$SAVED_SRC" 1 >/dev/null 2>&1
+  [[ -n $TMPDIR_M ]] && rm -rf "$TMPDIR_M"
+  return 0
 }
 
 # ---- commands ---------------------------------------------------------------
 cmd_measure() {
   need pactl; need pw-play; need pw-record; need python3; need_pa
-  local sink source vol=60
+  local again=0 fast=0 position="" assume_yes=0
+  while (( $# )); do
+    case "$1" in
+      --again)    again=1 ;;
+      --fast)     fast=1 ;;
+      --yes|-y)   assume_yes=1 ;;
+      --position) position="$2"; shift ;;
+      *) die "usage: omarchy-eq measure [--again] [--fast] [--yes] [--position NAME]" ;;
+    esac
+    shift
+  done
+  (( fast )) && REPEATS=1
+
+  local sink source
   sink=$(detect_sink); source=$(detect_source)
   [[ -n $sink   ]] || die "no built-in analog sink found"
   [[ -n $source ]] || die "no built-in analog capture source found -- measurement needs the internal mic"
+  state_for "$sink"
 
-  mkdir -p "$STATE"; local tmp; tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' RETURN
+  [[ -z $position ]] && position=$( (( again )) && echo "position-2" || echo "position-1" )
+
+  [[ -n $TMPDIR_M ]] && rm -rf "$TMPDIR_M"
+  TMPDIR_M=$(mktemp -d)
+  trap restore_audio EXIT INT TERM
 
   info "sink   : $sink"
   info "source : $source"
-  cat <<EOF
+  local secs=$(( ${#FREQS[@]} * REPEATS * 2 + 5 ))
+  if (( again )); then
+    cat <<EOF
 
-  This plays ${#FREQS[@]} test tones through your speakers and records them on the
-  internal mic. It takes about $(( ${#FREQS[@]} * 2 )) seconds and will be audible.
+  Second measurement. Change the geometry before continuing -- shift the lid
+  angle, or move the laptop a few centimetres. Do not skip this: the two runs
+  are compared, and only what stays the same in both is treated as your
+  speaker. Anything that moves was the room.
+
+  About $(( secs / 60 ))m$(( secs % 60 ))s, audible.
+
+EOF
+  else
+    cat <<EOF
+
+  This plays ${#FREQS[@]} warbled test tones through your speakers and records
+  them on the internal mic. About $(( secs / 60 ))m$(( secs % 60 ))s, audible.
+  This starts a fresh measurement, replacing any previous one.
 
   For a usable measurement: quiet room, laptop on a hard flat surface,
   lid at normal viewing angle, and do not type while it runs.
 
+  Afterwards run 'omarchy-eq measure --again' from a second position.
+
 EOF
-  read -rp "  Press Enter to start, Ctrl-C to abort. " _
+  fi
+  (( assume_yes )) || read -rp "  Press Enter to start, Ctrl-C to abort. " _ \
+    || die "needs an interactive terminal to confirm before measuring"
 
+  save_audio "$sink" "$source"
+  (( again )) || rm -f "$RESPONSE"
   pactl set-sink-mute "$sink" 0 >/dev/null 2>&1
-  pactl set-sink-volume "$sink" "${vol}%" >/dev/null 2>&1
+  pactl set-sink-volume "$sink" "${MEAS_VOL}%" >/dev/null 2>&1
   pactl set-source-mute "$source" 0 >/dev/null 2>&1
-  : > "$RESPONSE"
-  echo "# omarchy-eq response measurement -- $(date -Is)" >> "$RESPONSE"
-  echo "# sink=$sink source=$source volume=${vol}%" >> "$RESPONSE"
 
+  # Noise floor first. Without it a failed capture and a genuinely silent band
+  # are indistinguishable -- the old code wrote -120 for both.
+  info "measuring noise floor (stay quiet)..."
+  timeout -s INT 2.2 pw-record --target="$source" "$TMPDIR_M/floor.wav" >/dev/null 2>&1
+  declare -A FLOOR
+  while read -r f db; do FLOOR[$f]="$db"; done < <(py analyze.py floor "$TMPDIR_M/floor.wav" "${FREQS[@]}" 2>/dev/null)
+
+  local run="$TMPDIR_M/run.txt"; : > "$run"
+  printf '\n  %8s %10s %8s %s\n' freq level snr ''
   for f in "${FREQS[@]}"; do
-    tone_wav "$f" "$tmp/t.wav"
-    pw-play --target="$sink" "$tmp/t.wav" >/dev/null 2>&1 &
-    local pid=$!
-    sleep 0.55
-    timeout -s INT 1.1 pw-record --target="$source" "$tmp/r.wav" >/dev/null 2>&1
-    wait $pid 2>/dev/null
-    local db; db=$(python3 "$LIB/analyze.py" tone "$tmp/r.wav" "$f" 2>/dev/null || echo "-120")
-    printf '%s %s\n' "$f" "$db" >> "$RESPONSE"
-    printf '  %6s Hz  %8s dB\n' "$f" "$db"
+    tone_wav "$f" "$TMPDIR_M/t.wav"
+    local vals=() i db
+    for (( i = 0; i < REPEATS; i++ )); do
+      pw-play --target="$sink" "$TMPDIR_M/t.wav" >/dev/null 2>&1 &
+      local pid=$!
+      sleep 0.30
+      timeout -s INT "$REC_SEC" pw-record --target="$source" "$TMPDIR_M/r.wav" >/dev/null 2>&1
+      wait $pid 2>/dev/null
+      db=$(py analyze.py band "$TMPDIR_M/r.wav" "$f" 2>/dev/null || echo "-120")
+      vals+=("$db")
+    done
+    # median of the repeats: one keystroke or fan spin-up cannot move it
+    local med; med=$(printf '%s\n' "${vals[@]}" | sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
+    local floor="${FLOOR[$f]:--120}"
+    local snr; snr=$(awk -v a="$med" -v b="$floor" 'BEGIN{printf "%.2f", a-b}')
+    printf '%s %s %s\n' "$f" "$med" "$snr" >> "$run"
+    local mark=""; awk -v s="$snr" 'BEGIN{exit !(s<10)}' && mark=$'\033[33m  low SNR - dropped\033[0m'
+    printf '  %6s Hz %9s dB %7s dB%b\n' "$f" "$med" "$snr" "$mark"
   done
+
+  echo
+  py state.py add-run "$sink" "$source" "$position" "$run" "${MEAS_VOL}%" || {
+    # Never claim success here: the sweep took minutes and the raw readings are
+    # about to be deleted with the tempdir. Keep them so the run is recoverable.
+    local keep="$STATE_FALLBACK"
+    mkdir -p "$(dirname "$keep")" && cp "$run" "$keep" 2>/dev/null
+    die "could not record the run. Raw readings kept at: $keep"
+  }
   info "written: $RESPONSE"
-  info "next   : omarchy-eq generate"
+  if (( again )); then
+    info "next   : omarchy-eq generate"
+  else
+    info "next   : omarchy-eq measure --again   (second position -- strongly recommended)"
+  fi
+}
+
+# Resume whatever media player is already running, preferring a real music app
+# over a browser tab.
+play_music() {
+  local want="${1:-auto}" p
+  [[ $want == none ]] && return 0
+  if [[ $want != auto && -f $want ]]; then
+    command -v mpv >/dev/null || die "mpv is needed to play $want"
+    setsid mpv --really-quiet --loop --no-video "$want" >/dev/null 2>&1 &
+    info "playing: $want (loop)"; return 0
+  fi
+  if command -v playerctl >/dev/null; then
+    p=$(playerctl -l 2>/dev/null | grep -viE 'firefox|chrom' | head -1)
+    [[ -z $p ]] && p=$(playerctl -l 2>/dev/null | head -1)
+    if [[ -n $p ]]; then
+      playerctl -p "$p" play >/dev/null 2>&1 && { info "resumed playback: $p"; return 0; }
+    fi
+  fi
+  warn "no media player running -- start some music, then: omarchy-eq ab"
+  return 0
+}
+
+cmd_calibrate() {
+  need pactl; need pw-play; need pw-record; need python3; need_pa
+  local music=auto fast=()
+  while (( $# )); do
+    case "$1" in
+      --play) music="$2"; shift ;;
+      --fast) fast=(--fast) ;;
+      *) die "usage: omarchy-eq calibrate [--play FILE|none] [--fast]" ;;
+    esac
+    shift
+  done
+
+  cat <<EOF
+
+  [1mFull calibration.[0m Two measurements, then EQ, then your music back on.
+
+  1. A sweep from where the laptop is now      (~3 min, audible)
+  2. You move the laptop, then the same sweep  (~3 min, audible)
+  3. Profiles are derived and installed, and playback resumes
+
+  Step 2 is what makes this trustworthy: a reflection null moves when the
+  microphone moves, your speaker does not, so anything that disagrees between
+  the two positions gets thrown away.
+
+  Quiet room, hard flat surface, and do not type while a sweep runs.
+
+EOF
+  read -rp "  Press Enter to begin, Ctrl-C to abort. " _ \
+    || die "needs an interactive terminal to confirm before measuring"
+
+  cmd_measure --yes "${fast[@]}"
+  cat <<EOF
+
+  [1mNow change the geometry.[0m Tilt the lid noticeably, or slide the
+  laptop 5-10 cm. Do not skip this -- if nothing moves, the second sweep just
+  confirms the first one's reflections instead of exposing them.
+
+EOF
+  read -rp "  Moved it? Press Enter for the second sweep. " _ \
+    || die "needs an interactive terminal to confirm before measuring"
+  cmd_measure --yes --again "${fast[@]}"
+
+  cmd_generate
+  cmd_apply
+  sleep 1
+  play_music "$music"
+  sleep 1
+  cmd_ab balanced >/dev/null 2>&1
+
+  cat <<EOF
+
+  [1mNow compare.[0m Music is routed through the balanced profile.
+
+    omarchy-eq ab            cycle: flat -> balanced -> voice -> music
+    omarchy-eq ab flat       the reference: no EQ at all
+    omarchy-eq tui           see the measured curve and each EQ
+    SUPER+ALT+E              same as 'omarchy-eq ab', one-handed
+
+  Switch mid-song. Comparing after a restart does not work -- you forget what
+  the last one sounded like.
+
+EOF
 }
 
 cmd_generate() {
+  state_for
   [[ -f $RESPONSE ]] || die "no measurement found -- run: omarchy-eq measure"
-  mkdir -p "$STATE"
-  python3 "$LIB/generate.py" "$RESPONSE" "$PROFILES" || die "generation failed"
+  py generate.py "$RESPONSE" "$PROFILES" || die "generation failed"
   info "written: $PROFILES"
   info "next   : omarchy-eq apply"
 }
 
 cmd_apply() {
   need_pa
+  state_for
   [[ -f $PROFILES ]] || die "no profiles -- run: omarchy-eq generate"
-  local sink; sink=$(detect_sink); [[ -n $sink ]] || die "no built-in sink found"
   mkdir -p "$CONFD"
-  python3 "$LIB/render.py" "$PROFILES" "$sink" > "$EQ_CONF" || die "render failed"
+  py render.py "$PROFILES" "$DEV_SINK" > "$EQ_CONF" || die "render failed"
   info "installed: $EQ_CONF"
   restart_pw
   info "profiles now available:"
   pactl list short sinks | awk '$2 ~ /^eq_/ {printf "    %s\n", $2}'
   info "switch with: omarchy-eq ab <profile>   (or just: omarchy-eq ab)"
+}
+
+cmd_export() {
+  state_for
+  [[ -f $RESPONSE ]] || die "no measurement found -- run: omarchy-eq measure"
+  py state.py export "$RESPONSE"
 }
 
 cmd_mic() {
@@ -155,63 +391,84 @@ cmd_mic() {
 
 cmd_ab() {
   need_pa
+  state_for
   [[ -f $PROFILES ]] || die "no profiles -- run: omarchy-eq generate && omarchy-eq apply"
-  local raw; raw=$(detect_sink)
-  mapfile -t keys < <(python3 -c "import json;print('\n'.join(json.load(open('$PROFILES'))['profiles']))")
-  local order=(flat "${keys[@]}")
+  local raw="$DEV_SINK"
   declare -A SINK DESC
+  local order=(flat)
   SINK[flat]="$raw"; DESC[flat]="no EQ - raw speakers (reference)"
-  local k
-  for k in "${keys[@]}"; do
-    SINK[$k]="eq_$k"
-    DESC[$k]=$(python3 -c "
-import json;p=json.load(open('$PROFILES'))['profiles']['$k']
-print(p['description']+' | '+' '.join('%s%g@%g'%('+' if f['control'].get('Gain',0)>0 else '',f['control'].get('Gain',0),f['control']['Freq']) if 'Gain' in f['control'] else 'HPF%gHz'%f['control']['Freq'] for f in p['filters']))")
-  done
+  # One python call for every profile, path via argv rather than interpolated
+  # into a quoted literal.
+  local key desc
+  while IFS=$'\t' read -r key desc; do
+    [[ -n $key ]] || continue
+    order+=("$key"); SINK[$key]="eq_$key"; DESC[$key]="$desc"
+  done < <(py describe.py "$PROFILES" 2>/dev/null)
+  (( ${#order[@]} > 1 )) || die "no profiles in $PROFILES"
 
-  current() { local d; d=$(pactl get-default-sink 2>/dev/null)
-              for k in "${order[@]}"; do [[ ${SINK[$k]} == "$d" ]] && { echo "$k"; return; }; done; echo unknown; }
+  current() { local d j; d=$(pactl get-default-sink 2>/dev/null)
+              for j in "${order[@]}"; do [[ ${SINK[$j]} == "$d" ]] && { echo "$j"; return; }; done
+              echo unknown; }
 
-  local target
+  local target k
   case "${1:-cycle}" in
     status) k=$(current); printf 'active: %s\n  %s\n' "$k" "${DESC[$k]:-unknown}"; return ;;
     list)   for k in "${order[@]}"; do printf '  %-10s %s\n' "$k" "${DESC[$k]}"; done; return ;;
-    cycle)  local c n=0; c=$(current)
+    cycle)  local c n=0 i; c=$(current)
             for i in "${!order[@]}"; do [[ ${order[$i]} == "$c" ]] && n=$(( (i+1) % ${#order[@]} )); done
             target=${order[$n]} ;;
     *)      target="$1"; [[ -n ${SINK[$target]:-} ]] || die "unknown profile '$target' (have: ${order[*]})" ;;
   esac
 
-  pactl set-default-sink "${SINK[$target]}" >/dev/null 2>&1
+  set_default_verified "${SINK[$target]}" || \
+    warn "could not make ${SINK[$target]} the default sink (wireplumber may have overridden it)"
   # Move only real application streams. Rows with client "-" are the filter
   # chains' own outputs; moving those chains the EQs into each other.
   while read -r id _sink client _rest; do
     [[ -n $id && $client != "-" ]] && pactl move-sink-input "$id" "${SINK[$target]}" >/dev/null 2>&1
   done < <(pactl list short sink-inputs 2>/dev/null)
 
-  printf '\n  \033[1m▶ %s\033[0m\n    %s\n\n' "${target^^}" "${DESC[$target]}"
+  printf '\n  \033[1m> %s\033[0m\n    %s\n\n' "${target^^}" "${DESC[$target]}"
   command -v notify-send >/dev/null && notify-send -t 1500 "Speaker EQ: ${target^^}" "${DESC[$target]}" 2>/dev/null
   return 0
 }
 
+cmd_tui() { need python3; state_for; py tui.py "$RESPONSE" "$PROFILES" "$SELF"; }
+
+cmd_import() {
+  [[ -n ${1:-} ]] || die "usage: omarchy-eq import <file.txt> [name]"
+  [[ -f $1 ]] || die "no such file: $1"
+  state_for
+  py import_apo.py "$1" "$PROFILES" "${2:-}" || die "import failed"
+  info "next   : omarchy-eq apply"
+}
+
 cmd_doctor() {
   printf '\033[1momarchy-eq %s\033[0m\n\n' "$VERSION"
+  local sink; sink=$(detect_sink)
   printf 'pipewire      : %s\n' "$(systemctl --user is-active pipewire 2>/dev/null)"
   printf 'wireplumber   : %s\n' "$(systemctl --user is-active wireplumber 2>/dev/null)"
-  printf 'built-in sink : %s\n' "$(detect_sink)"
+  printf 'built-in sink : %s\n' "$sink"
   printf 'built-in src  : %s\n' "$(detect_source)"
   printf 'default sink  : %s\n' "$(pactl get-default-sink 2>/dev/null)"
   printf 'default src   : %s\n' "$(pactl get-default-source 2>/dev/null)"
-  printf 'measurement   : %s\n' "$([[ -f $RESPONSE ]] && echo "$RESPONSE" || echo '(none)')"
-  printf 'profiles      : %s\n' "$([[ -f $PROFILES ]] && echo "$PROFILES" || echo '(none)')"
+  if [[ -n $sink ]]; then
+    # Migrate before reporting, or doctor claims "(none)" for state that is
+    # merely still at the old path.
+    py state.py migrate "$sink" >/dev/null 2>&1
+    local r p; r=$(py state.py path response "$sink"); p=$(py state.py path profiles "$sink")
+    printf 'measurement   : %s\n' "$([[ -f $r ]] && echo "$r" || echo '(none)')"
+    printf 'profiles      : %s\n' "$([[ -f $p ]] && echo "$p" || echo '(none)')"
+    [[ -f $r ]] && py state.py summary "$r" | sed 's/^/                /'
+  fi
   printf 'eq config     : %s\n' "$([[ -f $EQ_CONF ]] && echo "$EQ_CONF" || echo '(not applied)')"
   printf 'mic config    : %s\n' "$([[ -f $MIC_CONF ]] && echo "$MIC_CONF" || echo '(not applied)')"
   printf 'rnnoise       : %s\n' "$([[ -f /usr/lib/ladspa/librnnoise_ladspa.so ]] && echo present || echo 'missing (noise-suppression-for-voice)')"
   echo
   echo 'filter chains (should all target the hardware sink):'
-  pactl list short sink-inputs 2>/dev/null | while read -r id sink client _; do
+  pactl list short sink-inputs 2>/dev/null | while read -r id sink2 client _; do
     [[ $client == "-" ]] || continue
-    printf '  %-5s -> %s\n' "$id" "$(pactl list short sinks | awk -v d="$sink" '$1==d{print $2}')"
+    printf '  %-5s -> %s\n' "$id" "$(pactl list short sinks | awk -v d="$sink2" '$1==d{print $2}')"
   done
 }
 
@@ -228,24 +485,33 @@ usage() {
   cat <<EOF
 omarchy-eq $VERSION -- measure, correct and A/B laptop speaker EQ
 
-  omarchy-eq measure            play test tones, record on the internal mic
+  omarchy-eq calibrate          everything: measure twice, derive, apply, play
+  omarchy-eq measure [--again]  play test tones, record on the internal mic
+                                --again = second position, compared with the first
   omarchy-eq generate           derive EQ profiles from the measurement
   omarchy-eq apply              install the profiles as PipeWire sinks
   omarchy-eq ab [profile]       switch profile live (no arg = cycle)
   omarchy-eq ab list|status     show profiles / what is active
+  omarchy-eq tui                curve + profile switcher in the terminal
+  omarchy-eq import <file.txt>  import an Equalizer APO / AutoEQ preset
+  omarchy-eq export             print the measured curve as plain text
   omarchy-eq mic [enable|disable]   RNNoise capture chain
   omarchy-eq doctor             show audio state and diagnose problems
   omarchy-eq reset              remove everything, restore raw output
 
-First run:  omarchy-eq measure && omarchy-eq generate && omarchy-eq apply
+First run:  omarchy-eq calibrate
 EOF
 }
 
 case "${1:-help}" in
+  calibrate) shift; cmd_calibrate "$@" ;;
   measure)  shift; cmd_measure "$@" ;;
   generate) shift; cmd_generate "$@" ;;
   apply)    shift; cmd_apply "$@" ;;
   ab)       shift; cmd_ab "$@" ;;
+  tui)      shift; cmd_tui "$@" ;;
+  import)   shift; cmd_import "$@" ;;
+  export)   shift; cmd_export "$@" ;;
   mic)      shift; cmd_mic "$@" ;;
   doctor)   shift; cmd_doctor "$@" ;;
   reset)    shift; cmd_reset "$@" ;;
