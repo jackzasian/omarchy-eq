@@ -12,8 +12,8 @@
   ],
   "activation": "on-demand",
   "entryPoints": {
-    "barWidget": "Panel.qml",
-    "service": "Service.qml"
+    "barWidget": "plugin/Panel.qml",
+    "service": "plugin/Service.qml"
   },
   "omarchy": {
     "homepage": "https://github.com/jackzasian/omarchy-eq"
