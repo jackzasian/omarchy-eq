@@ -1,0 +1,22 @@
+#!/bin/bash
+# Toggle omarchy-eq's automatic per-output profile switching.
+#
+# The menu needs a single row whose action flips a two-state setting, but
+# `omarchy-eq autoswitch` takes explicit enable/disable verbs -- deliberately,
+# because a toggle is ambiguous in a script. This shim reads the current state
+# and picks the verb, so the ambiguity lives in one place instead of in the
+# menu file.
+set -euo pipefail
+
+case "${1:-toggle}" in
+  toggle)
+    if omarchy-eq autoswitch status 2>/dev/null | grep -qx 'autoswitch : on'; then
+      omarchy-eq autoswitch disable
+      notify-send -t 2500 "EQ" "Auto-switching off" 2>/dev/null || true
+    else
+      omarchy-eq autoswitch enable
+      notify-send -t 2500 "EQ" "Auto-switching on -- outputs keep their own profile" 2>/dev/null || true
+    fi
+    ;;
+  *) exec omarchy-eq autoswitch "$@" ;;
+esac

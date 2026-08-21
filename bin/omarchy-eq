@@ -3,7 +3,7 @@
 # and A/B the results live. See README.md.
 set -uo pipefail
 
-VERSION="2.0.0"
+VERSION="3.0.0"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(dirname "$(dirname "$SELF")")"
 LIB="$ROOT/lib"
@@ -25,9 +25,23 @@ export PYTHONPATH="$LIB${PYTHONPATH:+:$PYTHONPATH}"
 # to reject. Only sort needed fixing; the pin below is the general guard.
 export LC_NUMERIC=C
 
-CONFD="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d"
-EQ_CONF="$CONFD/99-omarchy-eq.conf"
+XDG_CONF="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONFD="$XDG_CONF/pipewire/pipewire.conf.d"
+EQ_CONF="$CONFD/99-omarchy-eq.conf"      # pre-v3 static drop-in; migrated away
 MIC_CONF="$CONFD/98-omarchy-mic.conf"
+
+# The filter chains no longer live in pipewire.conf.d. They are loaded by a
+# second, tiny `pipewire -c` process that connects to the real daemon as an
+# ordinary client -- the arrangement /usr/share/pipewire/filter-chain.conf is
+# built for. The point is what it costs to change them: reloading chains now
+# restarts one short-lived process instead of the audio server, so installing an
+# EQ for headphones you just plugged in no longer stops every stream on the
+# machine. Auto-switching is only tolerable because of this.
+EQ_DIR="$XDG_CONF/omarchy-eq"
+CHAINS_CONF="$EQ_DIR/chains.conf"
+UNIT_DIR="$XDG_CONF/systemd/user"
+CHAINS_UNIT="omarchy-eq-chains.service"
+WATCH_UNIT="omarchy-eq-autoswitch.service"
 
 # 1/3-octave centres. Each tone warbles +/-1/6 octave, so the bands tile the
 # spectrum without gaps.
@@ -60,6 +74,138 @@ need_pa() {
 # and leaves the others bare, which happens to be right here but reads as though
 # every argument were prefixed.
 py() { local s="$1"; shift; python3 "$LIB/$s" "$@"; }
+
+have_systemd() { systemctl --user show-environment >/dev/null 2>&1; }
+
+sink_exists() { pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "$1"; }
+
+# Wait for a named sink to be published. Loading a chain is asynchronous, and
+# the caller's very next act is to make it the default.
+wait_for_sink() { # name [tries]
+  local i
+  for (( i = 0; i < ${2:-15}; i++ )); do
+    sink_exists "$1" && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# Write a unit only if it differs, and report whether it changed -- a
+# daemon-reload on every invocation of a hotkey command is rude.
+write_unit() { # name  (body on stdin)
+  local path="$UNIT_DIR/$1" tmp
+  mkdir -p "$UNIT_DIR"
+  tmp=$(mktemp)
+  cat > "$tmp"
+  if [[ -f $path ]] && cmp -s "$tmp" "$path"; then rm -f "$tmp"; return 1; fi
+  mv "$tmp" "$path"; chmod 0644 "$path"
+  systemctl --user daemon-reload 2>/dev/null
+  return 0
+}
+
+chains_unit() {
+  write_unit "$CHAINS_UNIT" <<UNIT
+[Unit]
+Description=omarchy-eq filter chains
+Documentation=https://github.com/jackzasian/omarchy-eq
+# PartOf so the chains go away with the daemon they are clients of, WantedBy so
+# they come back with it. Without the pair, a PipeWire restart leaves the sinks
+# either orphaned or missing until the next manual apply.
+After=pipewire.service
+PartOf=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=$(command -v pipewire || echo /usr/bin/pipewire) -c $CHAINS_CONF
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=pipewire.service
+UNIT
+}
+
+watch_unit() {
+  write_unit "$WATCH_UNIT" <<UNIT
+[Unit]
+Description=omarchy-eq automatic EQ profile switching
+Documentation=https://github.com/jackzasian/omarchy-eq
+After=pipewire-pulse.service
+PartOf=pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=$SELF autoswitch run
+Restart=always
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=pipewire-pulse.service
+UNIT
+}
+
+# Render the chain config for every connected device that has profiles.
+# Returns 1 when there is nothing to render, 2 when rendering failed.
+render_chains() { # destination
+  local args=() tag target label path n=0
+  while IFS=$'\t' read -r tag target label path; do
+    [[ -n $tag ]] || continue
+    args+=("$tag" "$target" "$label" "$path"); n=$(( n + 1 ))
+  done < <(py state.py render-args)
+  (( n )) || return 1
+  py render.py "${args[@]}" > "$1" || return 2
+  echo "$n"
+}
+
+# Bring the loaded chains into line with the profiles on disk. A no-op -- and
+# silent -- when nothing has changed, because the watcher calls this on every
+# device event and restarting the chains needlessly would click.
+# Returns 0 if it reloaded, 1 if nothing needed doing, 2 on failure.
+ensure_chains() { # [--quiet]
+  local quiet=0; [[ ${1:-} == --quiet ]] && quiet=1
+  local tmp rc n
+  mkdir -p "$EQ_DIR"
+  tmp=$(mktemp)
+  n=$(render_chains "$tmp"); rc=$?
+  if (( rc )); then
+    rm -f "$tmp"
+    (( quiet )) || {
+      (( rc == 1 )) && die "no profiles for any connected output -- run: omarchy-eq calibrate"
+      die "render failed"
+    }
+    return 2
+  fi
+  if [[ -f $CHAINS_CONF ]] && cmp -s "$tmp" "$CHAINS_CONF" && \
+     systemctl --user is-active "$CHAINS_UNIT" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$CHAINS_CONF"
+  chains_unit >/dev/null
+  systemctl --user enable "$CHAINS_UNIT" >/dev/null 2>&1
+  systemctl --user restart "$CHAINS_UNIT" 2>/dev/null || {
+    (( quiet )) || die "could not start $CHAINS_UNIT -- see: systemctl --user status $CHAINS_UNIT"
+    return 2
+  }
+  (( quiet )) || info "chains reloaded: $n device$( (( n > 1 )) && echo s )"
+  return 0
+}
+
+# Point the default sink and every application stream at one sink.
+# Factored out of `ab` so the watcher performs exactly the same switch.
+switch_to() { # sink
+  set_default_verified "$1" || \
+    warn "could not make $1 the default sink (wireplumber may have overridden it)"
+  # Move only real application streams. Rows with client "-" are the filter
+  # chains' own outputs; moving those chains the EQs into each other.
+  local id client
+  while read -r id _ client _; do
+    [[ -n $id && $client != "-" ]] && pactl move-sink-input "$id" "$1" >/dev/null 2>&1
+  done < <(pactl list short sink-inputs 2>/dev/null)
+  return 0
+}
 
 # ---- device detection -------------------------------------------------------
 # Prefer the built-in PCI codec; USB/BT devices are not what we want to EQ.
@@ -441,16 +587,64 @@ cmd_generate() {
 
 cmd_apply() {
   need_pa
-  local args=() tag target label path n=0
+  local static=0
+  while (( $# )); do
+    case "$1" in
+      --static) static=1 ;;
+      *) die "usage: omarchy-eq apply [--static]" ;;
+    esac
+    shift
+  done
+  have_systemd || static=1
+
+  if (( static )); then
+    cmd_apply_static
+    return
+  fi
+
+  # Migration off the pre-v3 drop-in. It has to go before the chains service
+  # starts, or every profile exists twice: once from the daemon's own config and
+  # once from ours, both pinned to the same hardware sink.
+  local migrating=0
+  if [[ -f $EQ_CONF ]]; then
+    rm -f "$EQ_CONF"; migrating=1
+    info "removed the old $EQ_CONF (chains now load without restarting PipeWire)"
+  fi
+
+  ensure_chains || true
+  (( migrating )) && restart_pw
+
+  # Chains are published asynchronously; without this the listing below can be
+  # empty on a machine that has just been told everything worked.
+  local i
+  for (( i = 0; i < 20; i++ )); do
+    pactl list short sinks 2>/dev/null | grep -q '\seq_' && break
+    sleep 0.2
+  done
+
+  info "profiles now available:"
+  pactl list short sinks | awk '$2 ~ /^eq_/ {printf "    %s\n", $2}'
+  info "switch with: omarchy-eq ab <profile>   (or just: omarchy-eq ab)"
+  if ! systemctl --user is-enabled "$WATCH_UNIT" >/dev/null 2>&1; then
+    info "tip    : omarchy-eq autoswitch enable   -- pick the profile per device automatically"
+  fi
+}
+
+# The pre-v3 arrangement: a drop-in the PipeWire daemon reads at startup, so
+# every change costs a full restart. Kept for systems without a systemd user
+# session, where there is nothing to supervise the chains process.
+cmd_apply_static() {
+  local tmp n
+  mkdir -p "$CONFD"
+  tmp=$(mktemp)
+  local args=() tag target label path
+  n=0
   while IFS=$'\t' read -r tag target label path; do
     [[ -n $tag ]] || continue
     args+=("$tag" "$target" "$label" "$path"); n=$(( n + 1 ))
   done < <(py state.py render-args)
-  (( n )) || die "no profiles for any connected output -- run: omarchy-eq calibrate"
-
-  mkdir -p "$CONFD"
-  local tmp; tmp=$(mktemp)
-  if ! py render.py "${args[@]}" > "$tmp"; then
+  (( n )) || { rm -f "$tmp"; die "no profiles for any connected output -- run: omarchy-eq calibrate"; }
+  if ! py render.py --fragment "${args[@]}" > "$tmp"; then
     rm -f "$tmp"; die "render failed"
   fi
   mv "$tmp" "$EQ_CONF"
@@ -526,8 +720,18 @@ cmd_mic() {
 
 cmd_ab() {
   need_pa
-  local spec=""
-  if [[ ${1:-} == --device ]]; then need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift 2; fi
+  local spec="" auto=0
+  while (( $# )); do
+    case "$1" in
+      --device) need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift ;;
+      # Set by the watcher. The switch is identical; only the bookkeeping
+      # differs -- a profile the watcher landed on is recorded unpinned, so a
+      # later auto-setup may still replace it, while your own choice may not.
+      --auto)   auto=1 ;;
+      *) break ;;
+    esac
+    shift
+  done
   state_for "$spec"
   if (( ! ${#PROFILE_KEYS[@]} )); then
     if [[ $DEV_MEASURABLE == 1 ]]; then
@@ -557,6 +761,8 @@ cmd_ab() {
             printf 'active: %s\n' "$k"
             printf '  %s\n' "${DESC[$k]:-unknown}"
             printf 'device: %s (%s)\n' "$DEV_LABEL" "$DEV_TAG"
+            local remembered; remembered=$(py prefs.py remembered "$DEV_NAME" 2>/dev/null)
+            [[ -n $remembered ]] && printf 'remembered: %s\n' "$remembered"
             return ;;
     list)   for k in "${order[@]}"; do printf '  %-10s %s\n' "$k" "${DESC[$k]}"; done; return ;;
     cycle)  local c n=0 i; c=$(current)
@@ -565,18 +771,17 @@ cmd_ab() {
     *)      target="$1"; [[ -n ${SINK[$target]:-} ]] || die "unknown profile '$target' (have: ${order[*]})" ;;
   esac
 
-  if [[ $target != flat ]]; then
-    pactl list short sinks | awk '{print $2}' | grep -qx "${SINK[$target]}" || \
+  if [[ $target != flat ]] && ! sink_exists "${SINK[$target]}"; then
+    # A chain can be missing simply because this device was not connected the
+    # last time apply ran. That is fixable here rather than by telling the user
+    # to go and fix it, and costs nothing when the config is already current.
+    ensure_chains --quiet
+    wait_for_sink "${SINK[$target]}" || \
       die "'${SINK[$target]}' is not loaded -- run: omarchy-eq apply"
   fi
 
-  set_default_verified "${SINK[$target]}" || \
-    warn "could not make ${SINK[$target]} the default sink (wireplumber may have overridden it)"
-  # Move only real application streams. Rows with client "-" are the filter
-  # chains' own outputs; moving those chains the EQs into each other.
-  while read -r id _sink client _rest; do
-    [[ -n $id && $client != "-" ]] && pactl move-sink-input "$id" "${SINK[$target]}" >/dev/null 2>&1
-  done < <(pactl list short sink-inputs 2>/dev/null)
+  switch_to "${SINK[$target]}"
+  py prefs.py remember "$DEV_NAME" "$target" "$(( ! auto ))" 2>/dev/null
 
   printf '\n  \033[1m> %s\033[0m  \033[2m%s\033[0m\n    %s\n\n' \
     "${target^^}" "$DEV_LABEL" "${DESC[$target]}"
@@ -593,20 +798,263 @@ cmd_tui() {
 }
 
 cmd_import() {
-  local spec="" file="" name=""
+  local spec="" file="" name="" bands="" rates=""
   while (( $# )); do
     case "$1" in
       --device) need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift ;;
+      --bands)  need_val --bands "${2:-}" "how many filters to fit a GraphicEQ curve onto"; bands="$2"; shift ;;
+      --rates)  need_val --rates "${2:-}" "comma-separated, e.g. 44100,48000"; rates="$2"; shift ;;
       *) if [[ -z $file ]]; then file="$1"; else name="$1"; fi ;;
     esac
     shift
   done
-  [[ -n $file ]] || die "usage: omarchy-eq import <file.txt> [name] [--device D]"
+  [[ -n $file ]] || die "usage: omarchy-eq import <file> [name] [--device D] [--bands N]"
   [[ -f $file ]] || die "no such file: $file"
   state_for "$spec"
   info "device : $DEV_LABEL"
-  set -- "$file" "$name"
-  py import_apo.py "$1" "$PROFILES" "${2:-}" || die "import failed"
+  local extra=()
+  [[ -n $bands ]] && extra+=(--bands "$bands")
+  [[ -n $rates ]] && extra+=(--rates "$rates")
+  py importer.py "$file" "$PROFILES" "$DEVDIR" "$name" "${extra[@]}" || die "import failed"
+  info "next   : omarchy-eq apply"
+}
+
+# ---- automatic switching ----------------------------------------------------
+# The whole feature in one sentence: when the output device changes, put it on
+# the profile you last used there. The interesting part is not the switching, it
+# is the restraint -- see autoswitch.py for the order of preference, and note
+# that `once` is written to be a no-op whenever nothing needs doing, because
+# PipeWire emits an event for our own set-default-sink and a watcher that reacted
+# to that would chase its own tail forever.
+
+autoswitch_notify() { # title body
+  [[ $(py prefs.py autoswitch 2>/dev/null | awk -F'\t' '$1=="notify"{print $2}') == 1 ]] || return 0
+  command -v notify-send >/dev/null && notify-send -t 2500 "$1" "$2" 2>/dev/null
+  return 0
+}
+
+autoswitch_once() { # [--verbose] [depth]
+  local verbose=0; [[ ${1:-} == --verbose ]] && { verbose=1; shift; }
+  local depth="${1:-0}"
+  local kind key val action="" profile="" target="" reason=""
+  local name="" tag="" label=""
+  while IFS=$'\t' read -r kind key val; do
+    case "$kind" in
+      error)   (( verbose )) && warn "$key"; return 1 ;;
+      device)  case "$key" in
+                 name) name="$val" ;; tag) tag="$val" ;; label) label="$val" ;;
+               esac ;;
+      action)  action="$key" ;;
+      profile) profile="$key" ;;
+      target)  target="$key" ;;
+      reason)  reason="$key" ;;
+    esac
+  done < <(py autoswitch.py decide)
+  [[ -n $action ]] || return 1
+
+  case "$action" in
+    none)
+      (( verbose )) && info "$label: nothing to do ($reason)"
+      return 0 ;;
+    setup)
+      # Only reached with auto-setup switched on. Depth-guarded: setup installs
+      # profiles and we re-decide once, but a second failure must not loop.
+      (( depth )) && return 1
+      (( verbose )) && info "$label: no profiles -- looking it up in the AutoEQ database"
+      local out rc
+      out=$(py autoswitch.py setup 2>&1); rc=$?
+      local installed
+      installed=$(printf '%s\n' "$out" | awk -F'\t' '$1=="installed"{print $2"\t"$3}')
+      if (( rc )) || [[ -z $installed ]]; then
+        local why
+        why=$(printf '%s\n' "$out" | awk -F'\t' '$1=="error"{print $2; exit}')
+        # Spelled out rather than folded into a ${why:-...} default: the
+        # fallback quotes the device name, and single quotes nested inside a
+        # parameter expansion inside double quotes is a construct nobody should
+        # have to squint at to confirm it expands.
+        [[ -n $why ]] || why="auto-setup found nothing for '$label'"
+        (( verbose )) && warn "$why"
+        return 1
+      fi
+      local ikey iname
+      IFS=$'\t' read -r ikey iname <<< "$installed"
+      (( verbose )) && info "installed '$ikey' -- $iname"
+      autoswitch_notify "EQ: $label" "auto-configured from AutoEQ: $iname"
+      ensure_chains --quiet
+      # Build the argument list explicitly. The obvious
+      # `autoswitch_once $( ... && echo --verbose ) 1` relies on word splitting,
+      # and when verbose is off the empty expansion vanishes and `1` lands in
+      # the flag position instead of the depth position.
+      local -a again=()
+      (( verbose )) && again+=(--verbose)
+      again+=(1)
+      autoswitch_once "${again[@]}"
+      return $? ;;
+    switch)
+      (( verbose )) && info "$label -> $profile ($reason)"
+      if [[ $profile != flat ]] && ! sink_exists "$target"; then
+        ensure_chains --quiet
+        wait_for_sink "$target" || {
+          (( verbose )) && warn "'$target' did not appear -- run: omarchy-eq apply"
+          return 1
+        }
+      fi
+      switch_to "$target"
+      autoswitch_notify "EQ: ${profile^^}" "$label"
+      return 0 ;;
+  esac
+  return 0
+}
+
+autoswitch_run() {
+  need pactl; need_pa
+  info "watching for output changes (Ctrl-C to stop)"
+  autoswitch_once --verbose || true
+  # `sink` covers devices appearing and going away, `card` covers a Bluetooth
+  # headset flipping between its A2DP and call profiles, and `server` covers the
+  # default sink moving. sink-input is deliberately not watched: it fires on
+  # every stream every application opens, and none of that changes the answer.
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *" on sink "*|*" on card "*|*" on server"*) ;;
+      *) continue ;;
+    esac
+    # Drain the burst. A single headphone connect emits a card change, a sink
+    # removal, a sink addition and a server change within a few milliseconds;
+    # acting on the first of those means acting on a half-built graph.
+    while read -r -t 0.5 _; do :; done
+    autoswitch_once --verbose || true
+  done < <(pactl subscribe 2>/dev/null)
+}
+
+cmd_autoswitch() {
+  local action="${1:-status}"; shift || true
+  local want_fetch="" want_notify=""
+  while (( $# )); do
+    case "$1" in
+      --fetch)     want_fetch=1 ;;
+      --no-fetch)  want_fetch=0 ;;
+      --quiet)     want_notify=0 ;;
+      --notify)    want_notify=1 ;;
+      *) die "usage: omarchy-eq autoswitch [enable|disable|status|once|run] [--fetch] [--quiet]" ;;
+    esac
+    shift
+  done
+
+  case "$action" in
+    enable)
+      have_systemd || die "no systemd user session -- run 'omarchy-eq autoswitch run' from your session startup instead"
+      local sets=(enabled=1)
+      [[ -n $want_fetch ]] && sets+=("fetch=$want_fetch")
+      [[ -n $want_notify ]] && sets+=("notify=$want_notify")
+      py prefs.py set-autoswitch "${sets[@]}" || die "could not save settings"
+      watch_unit >/dev/null
+      systemctl --user enable --now "$WATCH_UNIT" >/dev/null 2>&1 || \
+        die "could not start $WATCH_UNIT -- see: systemctl --user status $WATCH_UNIT"
+      info "automatic switching is on"
+      if [[ ${want_fetch:-0} == 1 ]]; then
+        info "auto-setup is on: an unrecognised output will be looked up in the"
+        info "AutoEQ database, which sends its name to github.com"
+      fi
+      cmd_autoswitch status ;;
+    disable)
+      py prefs.py set-autoswitch enabled=0 >/dev/null 2>&1
+      systemctl --user disable --now "$WATCH_UNIT" >/dev/null 2>&1
+      info "automatic switching is off" ;;
+    status)
+      local enabled fetch notify
+      while IFS=$'\t' read -r kind val; do
+        case "$kind" in enabled) enabled="$val" ;; fetch) fetch="$val" ;;
+                        notify) notify="$val" ;; esac
+      done < <(py prefs.py autoswitch)
+      printf 'autoswitch : %s\n' "$( [[ ${enabled:-0} == 1 ]] && echo on || echo off )"
+      printf 'service    : %s\n' "$(systemctl --user is-active "$WATCH_UNIT" 2>/dev/null)"
+      printf 'auto-setup : %s\n' "$( [[ ${fetch:-0} == 1 ]] && echo 'on (looks up unknown outputs on github.com)' || echo off )"
+      printf 'notify     : %s\n' "$( [[ ${notify:-1} == 1 ]] && echo on || echo off )"
+      echo
+      echo 'remembered per output:'
+      py state.py remembered | sed 's/^/  /' ;;
+    once) need_pa; autoswitch_once --verbose ;;
+    run)  autoswitch_run ;;
+    *) die "usage: omarchy-eq autoswitch [enable|disable|status|once|run] [--fetch] [--quiet]" ;;
+  esac
+}
+
+# ---- AutoEQ database --------------------------------------------------------
+cmd_fetch() {
+  need python3
+  local spec="" query="" fmt="parametric" bands="" yes=0 want=""
+  while (( $# )); do
+    case "$1" in
+      --device) need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift ;;
+      --format) need_val --format "${2:-}" "parametric|graphic|fixedband|convolution"; fmt="$2"; shift ;;
+      --bands)  need_val --bands "${2:-}"; bands="$2"; shift ;;
+      --pick)   need_val --pick "${2:-}" "the number of a result"; want="$2"; shift ;;
+      --yes|-y) yes=1 ;;
+      *) query="${query:+$query }$1" ;;
+    esac
+    shift
+  done
+  state_for "$spec"
+  # No query: use the device's own name. That is the case worth optimising --
+  # you plugged something in and want the EQ for it.
+  [[ -n $query ]] || { query="$DEV_LABEL"; info "searching for: $query"; }
+
+  local -a names=() paths=() sources=() targets=()
+  # The leading score column is consumed and discarded -- results arrive already
+  # ranked, so the number itself is only useful to `autoeq.py match`.
+  local _score nm src tgt pth
+  while IFS=$'\t' read -r _score nm src tgt pth; do
+    [[ -n $pth ]] || continue
+    names+=("$nm"); sources+=("$src"); targets+=("$tgt"); paths+=("$pth")
+  done < <(py autoeq.py search "$query" 12)
+  (( ${#paths[@]} )) || die "no AutoEQ presets match '$query'
+       Browse the catalogue at https://autoeq.app, or download a preset
+       yourself and use: omarchy-eq import <file>"
+
+  local pick=1
+  if (( ${#paths[@]} > 1 )) && [[ -z $want ]] && (( ! yes )); then
+    echo
+    local i
+    for i in "${!names[@]}"; do
+      printf '  %2d  %-40s %s%s\n' "$(( i + 1 ))" "${names[$i]}" \
+        "${sources[$i]}" "$( [[ ${targets[$i]} != - ]] && echo " on ${targets[$i]}" )"
+    done
+    echo
+    read -rp "  Which one? [1] " pick || die "needs an interactive terminal (or use --pick N)"
+    [[ -z $pick ]] && pick=1
+  elif [[ -n $want ]]; then
+    pick="$want"
+  fi
+  if ! [[ $pick =~ ^[0-9]+$ ]] || (( pick < 1 || pick > ${#paths[@]} )); then
+    die "pick a number between 1 and ${#paths[@]}"
+  fi
+  local idx=$(( pick - 1 ))
+
+  local tmp; tmp=$(mktemp -d)
+  local rate=48000
+  [[ $fmt == convolution ]] && rate=$(py devices.py rates | awk '{print int($1)}')
+  local file err
+  err=$(mktemp)
+  if ! file=$(py autoeq.py get "${paths[$idx]}" "$tmp" "$fmt" "$rate" 2>"$err"); then
+    local why; why=$(cat "$err"); rm -rf "$tmp" "$err"
+    # A missing format and a broken network are different problems with
+    # different fixes, and only one of them is worth suggesting a format for.
+    if [[ $why == *404* ]]; then
+      die "'${names[$idx]}' is not published as $fmt.
+       Try: omarchy-eq fetch \"$query\" --format parametric"
+    fi
+    die "${why:-could not download the preset}"
+  fi
+  rm -f "$err"
+  info "device : $DEV_LABEL"
+  info "preset : ${names[$idx]} by ${sources[$idx]}"
+  local extra=(); [[ -n $bands ]] && extra=(--bands "$bands")
+  py importer.py "$file" "$PROFILES" "$DEVDIR" "" "${extra[@]}" || {
+    rm -rf "$tmp"; die "import failed"
+  }
+  rm -rf "$tmp"
   info "next   : omarchy-eq apply"
 }
 
@@ -617,7 +1065,12 @@ cmd_doctor() {
   printf 'default sink  : %s\n' "$(pactl get-default-sink 2>/dev/null)"
   printf 'default src   : %s\n' "$(pactl get-default-source 2>/dev/null)"
   printf 'built-in src  : %s\n' "$(detect_source)"
-  printf 'eq config     : %s\n' "$([[ -f $EQ_CONF ]] && echo "$EQ_CONF" || echo '(not applied)')"
+  printf 'chains config : %s\n' "$([[ -f $CHAINS_CONF ]] && echo "$CHAINS_CONF" || echo '(not applied)')"
+  printf 'chains service: %s\n' "$(systemctl --user is-active "$CHAINS_UNIT" 2>/dev/null)"
+  printf 'autoswitch    : %s\n' "$(systemctl --user is-active "$WATCH_UNIT" 2>/dev/null)"
+  printf 'graph rate    : %s Hz\n' "$(py devices.py rates 2>/dev/null | tr ' ' ',')"
+  [[ -f $EQ_CONF ]] && \
+    printf 'legacy config : %s  \033[33m(pre-v3 -- run: omarchy-eq apply)\033[0m\n' "$EQ_CONF"
   printf 'mic config    : %s\n' "$([[ -f $MIC_CONF ]] && echo "$MIC_CONF" || echo '(not applied)')"
   printf 'rnnoise       : %s\n' "$([[ -f /usr/lib/ladspa/librnnoise_ladspa.so ]] && echo present || echo 'missing (noise-suppression-for-voice)')"
   echo
@@ -640,12 +1093,22 @@ cmd_doctor() {
 }
 
 cmd_reset() {
-  rm -f "$EQ_CONF" "$MIC_CONF"
-  info "removed EQ and mic configs"
+  # Stop the watcher first. Otherwise it observes the default sink moving back
+  # to the hardware and helpfully switches it away again.
+  systemctl --user disable --now "$WATCH_UNIT" >/dev/null 2>&1
+  systemctl --user disable --now "$CHAINS_UNIT" >/dev/null 2>&1
+  py prefs.py set-autoswitch enabled=0 >/dev/null 2>&1
+  rm -f "$UNIT_DIR/$WATCH_UNIT" "$UNIT_DIR/$CHAINS_UNIT"
+  systemctl --user daemon-reload 2>/dev/null
+  rm -f "$CHAINS_CONF" "$EQ_CONF" "$MIC_CONF"
+  info "removed EQ and mic configs, and the services that loaded them"
   local raw; raw=$(detect_sink)
+  # Only the legacy drop-in needs the daemon restarted to be forgotten; the
+  # chains went away with their own process.
   restart_pw
   [[ -n $raw ]] && pactl set-default-sink "$raw" >/dev/null 2>&1
   info "restored raw output: $raw"
+  info "measurements and profiles are kept -- 'omarchy-eq apply' puts them back"
 }
 
 usage() {
@@ -658,11 +1121,15 @@ omarchy-eq $VERSION -- measure, correct and A/B your speakers, per output device
   omarchy-eq ab list|status     show profiles / what is active
   omarchy-eq tui                curve + profile switcher in the terminal
 
+  omarchy-eq autoswitch enable  follow the output device automatically
+  omarchy-eq fetch [model]      find a preset in the AutoEQ database and import it
+
   omarchy-eq measure [--again]  play test tones, record on the internal mic
                                 --again = second position, compared with the first
   omarchy-eq generate           derive EQ profiles from the measurement
   omarchy-eq apply              install profiles as PipeWire sinks (all devices)
-  omarchy-eq import <file.txt>  import an Equalizer APO / AutoEQ preset
+  omarchy-eq import <file>      import a preset: ParametricEQ / FixedBandEQ /
+                                GraphicEQ .txt, or a .wav impulse response
   omarchy-eq export             print the measured curve as plain text
 
   omarchy-eq mic [enable|disable|toggle]   RNNoise capture chain
@@ -673,7 +1140,11 @@ Every command above takes --device <tag|name|description> and otherwise acts on
 whichever output is currently in use. 'omarchy-eq devices' lists the tags.
 
 Speakers get measured. Headsets and network outputs cannot be -- the laptop
-microphone cannot hear them -- so give those an imported preset instead.
+microphone cannot hear them -- so give those a preset instead, either with
+'omarchy-eq fetch' (searches the AutoEQ database) or 'import' (a file you have).
+
+With autoswitch on, plugging in headphones puts them back on whatever profile
+you last used with them, without restarting PipeWire or interrupting playback.
 
 First run:  omarchy-eq calibrate
 EOF
@@ -688,6 +1159,8 @@ case "${1:-help}" in
   ab)       shift; cmd_ab "$@" ;;
   tui)      shift; cmd_tui "$@" ;;
   import)   shift; cmd_import "$@" ;;
+  fetch)    shift; cmd_fetch "$@" ;;
+  autoswitch) shift; cmd_autoswitch "$@" ;;
   export)   shift; cmd_export "$@" ;;
   mic)      shift; cmd_mic "$@" ;;
   doctor)   shift; cmd_doctor "$@" ;;

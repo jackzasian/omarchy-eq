@@ -1,0 +1,31 @@
+#!/bin/bash
+# Import a preset file into the current output's profiles, via a file chooser.
+#
+# omarchy-eq accepts four shapes here -- Equalizer APO parametric and
+# fixed-band text, an AutoEq GraphicEQ curve, and a .wav impulse response --
+# so the filter is deliberately wide rather than ParametricEQ-only.
+set -euo pipefail
+
+command -v omarchy-eq >/dev/null || exit 1
+
+pick_file() {
+  if command -v zenity >/dev/null; then
+    zenity --file-selection --title="Import an EQ preset" \
+      --file-filter="EQ presets | *.txt *.wav" --file-filter="All files | *" 2>/dev/null
+  elif command -v gum >/dev/null; then
+    gum file --height 15 "$HOME/Downloads" 2>/dev/null || gum file --height 15 "$HOME"
+  else
+    return 1
+  fi
+}
+
+file=$(pick_file) || exit 0
+[[ -n ${file:-} && -f $file ]] || exit 0
+
+if out=$(omarchy-eq import "$file" 2>&1); then
+  omarchy-eq apply >/dev/null 2>&1 || true
+  notify-send -t 5000 "EQ: imported" "$(sed -n 's/^imported //p' <<<"$out" | head -1)" 2>/dev/null || true
+else
+  notify-send -t 6000 "EQ: import failed" "$(tail -2 <<<"$out")" 2>/dev/null || true
+  exit 1
+fi

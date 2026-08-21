@@ -12,7 +12,10 @@ import sys
 def summarise(profile):
     bits = []
     for f in profile["filters"]:
-        c = f["control"]
+        if f["label"] == "convolver":
+            bits.append("FIR%dtaps" % profile.get("ir_taps", 0))
+            continue
+        c = f.get("control") or {}
         if f["label"] == "linear":
             bits.append("pre%+.1fdB" % (20.0 * math.log10(max(float(c.get("mult", 1.0)), 1e-9))))
         elif "Gain" in c:

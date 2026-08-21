@@ -1,7 +1,9 @@
 # omarchy-eq
 
 Measure your laptop speakers with their own microphone, derive an EQ from the
-measurement, and A/B the result live.
+measurement, and A/B the result live. Headphones get the same treatment from
+measured presets instead — imported, or fetched from the AutoEq database — and
+every output keeps its own EQ, switched automatically as you plug things in.
 
 Laptop speakers are small, sealed and mounted in a chassis that resonates. They
 share a family of problems — no output below a few hundred Hz, a honky low-mid
@@ -19,11 +21,14 @@ git clone https://github.com/jackzasian/omarchy-eq
 cd omarchy-eq && ./install.sh --omarchy
 ```
 
-No root required. Everything lives under `~/.local` and `~/.config/pipewire`.
+No root required. Everything lives under `~/.local` and `~/.config`.
 Drop `--omarchy` if you are not on Omarchy. An Arch `PKGBUILD` is included.
 
-**Requires** PipeWire + `pactl`, and `python3` (stdlib only — no numpy/scipy).
-The optional mic chain needs `noise-suppression-for-voice`.
+**Requires** PipeWire + `pactl`, and `python3` (stdlib only — no numpy/scipy;
+`fetch` talks to the AutoEq database with `urllib`). A systemd user session
+supervises the filter chains and the watcher; without one, `apply --static`
+falls back to the pre-v3 drop-in. The optional mic chain needs
+`noise-suppression-for-voice`.
 
 ## Use
 
@@ -53,9 +58,11 @@ notification naming the active profile and its curve.
 | Command | |
 |---|---|
 | `omarchy-eq devices` | list outputs and what each one has |
+| `omarchy-eq autoswitch enable` | follow the output device automatically |
+| `omarchy-eq fetch [model]` | search the AutoEq database and import a preset |
 | `omarchy-eq ab list\|status` | show profiles / what's active |
 | `omarchy-eq tui` | measured curve + EQ curve + profile switcher |
-| `omarchy-eq import <file.txt>` | import an Equalizer APO / AutoEQ preset |
+| `omarchy-eq import <file>` | import a preset: any AutoEq format, or a `.wav` impulse response |
 | `omarchy-eq export` | print the measured curve as plain text |
 | `omarchy-eq mic enable\|disable` | RNNoise capture chain |
 | `omarchy-eq doctor` | audio state + diagnosis |
@@ -95,6 +102,35 @@ omarchy-eq apply
 Devices that are not connected are skipped by `apply` — a filter chain pinned to
 an absent sink does nothing useful. Reconnect and re-run `omarchy-eq apply`.
 
+## Switching outputs automatically
+
+```bash
+omarchy-eq autoswitch enable
+```
+
+A user service watches PipeWire and, when the output changes, puts the new one
+on **the profile you last used there**. Plug in your headphones and they come
+back on their own correction; unplug them and the speakers come back on theirs.
+
+`omarchy-eq ab` records every switch you make, per device. A profile you chose
+yourself is *pinned*, and nothing automatic overrides it.
+
+The watcher is deliberately dull. `omarchy-eq autoswitch once` — the whole of
+its reaction to an event — is a no-op whenever nothing needs doing, because
+PipeWire emits an event for the tool's *own* `set-default-sink`. A watcher that
+acted on that would chase its own tail forever.
+
+What it picks, in order: the profile you last used there, if it still exists;
+`voice` when the device is a Bluetooth headset in its call profile; otherwise
+`balanced`; otherwise nothing, and it says why.
+
+**A Bluetooth headset is two outputs.** In A2DP it is a wideband stereo sink.
+Switch it to the headset profile for a call and BlueZ tears that sink down and
+publishes a mono one at 8 or 16 kHz. Same hardware, different response — so
+they get separate tags (`bt8ae6` and `bt8ae6hs`), separate measurements and
+separate EQ. Correcting the call profile with a curve derived from A2DP would
+be boosting treble the link never carries.
+
 ## Why two measurements
 
 Measure once and you are not measuring your speaker. You are measuring
@@ -122,6 +158,23 @@ Three things push back on this:
 You can skip `--again`, and the tool will work. It will also tell you that every
 point is single-confidence, and it is more likely to hit its safety clamps.
 
+## Applying without stopping the music
+
+`apply` does not restart PipeWire. The filter chains live in
+`~/.config/omarchy-eq/chains.conf`, loaded by a second small `pipewire -c`
+process supervised as `omarchy-eq-chains.service` — the arrangement PipeWire's
+own `filter-chain.conf` is built for. Reloading them restarts one short-lived
+process and leaves every stream playing.
+
+That is not a nicety, it is what makes the rest of this possible. Until v3 the
+chains were a drop-in that the audio daemon read at startup, so installing an EQ
+meant restarting the daemon and killing every stream on the machine. Doing that
+each time you plugged in headphones would be worse than having no EQ at all.
+
+Upgrading is automatic: the first `apply` deletes the old drop-in and restarts
+PipeWire exactly once. On a system with no systemd user session, `apply
+--static` keeps the old behaviour.
+
 ## What it will not do
 
 Corrections are clamped on purpose: highpass 80–300 Hz, cuts and boosts ≤6 dB,
@@ -136,22 +189,109 @@ than the midband. No small sealed driver is brighter than its own midrange, so
 that reading is the microphone's own resonance, and "correcting" it would cut
 real treble.
 
-## Importing headphone presets
+## Presets for headphones
+
+The laptop mic cannot hear your headphones, so they get a *measured* preset
+instead of a measurement. [AutoEq](https://autoeq.app) publishes about 6300 of
+them. Fetch one by name:
 
 ```bash
-omarchy-eq import ~/Downloads/HD650\ ParametricEQ.txt
+omarchy-eq fetch "HD 650"
 omarchy-eq apply
 ```
 
-Equalizer APO / [AutoEQ](https://autoeq.app) parametric presets map onto the same
-biquads PipeWire already implements, so an import is exact — no resampling and no
-approximation. `Preamp:` becomes a real broadband gain stage. Download the
-**ParametricEQ** variant; fixed-band `GraphicEQ` files are not parametric and are
-rejected with a message saying so.
+With no argument it searches for whatever is plugged in right now, which is
+usually what you want. `--pick N` skips the prompt, `--device D` targets another
+output, `--format` chooses the shape (below).
 
-Imported profiles survive `omarchy-eq generate`.
+The catalogue index is fetched once and cached under `~/.cache/omarchy-eq` for a
+week, so searching after that is local and instant. Nothing is fetched unless
+you ask.
+
+If you already have a file, `import` takes it:
+
+```bash
+omarchy-eq import ~/Downloads/"Nothing Ear ParametricEQ.txt" --device bt8ae6
+```
+
+### The four formats
+
+AutoEq publishes every correction four ways, and its
+["Choosing an Equalizer App"](https://github.com/jaakkopasanen/AutoEq/wiki/Choosing-an-Equalizer-App)
+page is really a guide to which of them your software can eat. PipeWire can eat
+all four, so all four are accepted — but they do not promise the same thing.
+
+| Format | |
+|---|---|
+| `ParametricEQ.txt` | **Exact.** Every line is a biquad PipeWire already implements, so importing is a parse and a name map. Prefer this one. |
+| `FixedBandEQ.txt` | Exact too — the same syntax with the frequencies pinned to fixed bands. |
+| `GraphicEQ.txt` | **Approximate.** A sampled target curve, not a filter description, so it is *fitted* onto a bank of peaking filters. The worst-case error is printed and stored. `--bands N` buys a closer fit (default 10). Real presets land under 1 dB. |
+| `.wav` impulse response | **Most accurate.** Run through PipeWire's `convolver`; an FIR can draw a response a biquad bank cannot. The file is copied into the device's state directory, because a chain pointing at `~/Downloads` breaks the first time you tidy up. |
+
+GraphicEQ used to be rejected outright, with a message telling you to go and
+find the parametric version. That is a fine answer right up until the only file
+you have is this one.
+
+AutoEq's impulse responses are **minimum phase** — their energy is at the very
+front, so they delay nothing. (The HD 650's 4800-tap response has half its
+energy inside the first three samples.) A linear-phase response of the same
+length really would cost half its length in latency, so `import` measures where
+the energy actually is rather than reporting length as latency.
+
+### Fitting a curve, and the sample rate trap
+
+Worth its own note, because getting it wrong is invisible. A biquad's shape near
+Nyquist comes partly from bilinear warping, and a fit will exploit that if you
+let it: fitted at 48 kHz alone, these presets came in under 1 dB of error *at
+48 kHz* and missed by 6 dB when the graph ran at 96.
+
+The obvious fix — fit for every common rate — is just as wrong, because every
+rate in the list is a constraint the fit has to satisfy. Fitting for 44.1, 48
+and 96 when the graph only ever runs at 48 **tripled** the error at 48.
+
+So the rate list is not a constant. It comes from PipeWire's own
+`clock.allowed-rates`, which is `[ 48000 ]` on a stock install and longer on a
+machine set up for bit-perfect playback. The rates a profile was fitted at are
+stored with it, and `doctor` says so if that setting changes afterwards.
+
+### Letting it set up new devices by itself
+
+```bash
+omarchy-eq autoswitch enable --fetch
+```
+
+Off by default. With it on, an output the tool has never seen gets looked up in
+the AutoEq catalogue and configured unattended — which means **sending the name
+of hardware you own to github.com**. That should be a choice, not something that
+starts happening when you plug in headphones.
+
+The matcher refuses to guess. It declines on a weak name match, and it declines
+on an *ambiguous* one — two different products scoring within a hair of each
+other is a coin flip, and silently EQ-ing someone's headphones from a coin flip
+is the failure mode worth engineering against. Several sources measuring the
+same model is not ambiguity; that is one answer with a source to pick.
+
+In practice it matches `WH-1000XM4 (Bluetooth Stereo)` to Sony WH-1000XM4, and
+it declines on `Nothing Ear (open)` — the catalogue has the different product
+`Nothing ear`, and installing that curve would be wrong.
+
+Imported and fetched profiles survive `omarchy-eq generate`.
 
 ## Omarchy integration
+
+There are two ways in. As an **Omarchy plugin**, which is the tidy one:
+
+```bash
+omarchy plugin add https://github.com/jackzasian/omarchy-eq.git --enable
+~/.config/omarchy/plugins/jackzasian.eq/install.sh
+```
+
+That adds the menu entries, a profile picker that lists whatever the current
+output actually has, and optional hotkeys. See [`plugin/README.md`](plugin/README.md).
+The second step is separate because Omarchy reads a single user-owned menu file:
+entries have to be merged into yours, and that is not something to do silently.
+
+Or by hand, which is what the rest of this section describes.
 
 `./install.sh --omarchy` installs the terminal shim and, if you have no menu
 extension yet, the menu file. Omarchy reads a single user-owned menu file, so if
@@ -186,7 +326,12 @@ surrogate pair and a wrong one is easy to write and awkward to spot.
 ~/.local/state/omarchy-eq/devices/<sink>/response.json   measurements
 ~/.local/state/omarchy-eq/devices/<sink>/profiles.json   derived + imported
 ~/.local/state/omarchy-eq/devices/<sink>/response.previous.json   the last one
-~/.config/pipewire/pipewire.conf.d/99-omarchy-eq.conf    generated, do not edit
+~/.local/state/omarchy-eq/devices/<sink>/ir/*.wav        imported impulse responses
+~/.local/state/omarchy-eq/config.json                    remembered profile per device
+~/.config/omarchy-eq/chains.conf                         generated, do not edit
+~/.config/systemd/user/omarchy-eq-chains.service         loads the chains
+~/.config/systemd/user/omarchy-eq-autoswitch.service     the watcher
+~/.cache/omarchy-eq/autoeq-index.md                      AutoEq catalogue, weekly
 ```
 
 A new measurement keeps the one it replaces as `response.previous.json` — a
@@ -238,6 +383,12 @@ the *current* `response.json`. If a measurement has landed since the last
 replace them with different numbers — leaving `profiles.json` out of step with the
 `99-omarchy-eq.conf` that is actually loaded.
 
+`doctor` also runs a health check over the installed profiles: a convolution
+profile whose impulse response was deleted, a curve fitted for sample rates that
+no longer apply, a poor fit, a remembered profile a later `generate` removed.
+Each of those fails quietly otherwise — the profile keeps its name and simply
+stops being what it claims to be.
+
 `doctor`, `ab status`, `devices` and `export` are read-only and safe to run
 against live state. To render the config without installing it, call the library
 directly rather than using `apply`:
@@ -245,5 +396,6 @@ directly rather than using `apply`:
 ```bash
 # Tab-separated, and device labels contain spaces -- split on tabs, not words.
 mapfile -t args < <(PYTHONPATH=lib python3 lib/state.py render-args | tr '\t' '\n')
-PYTHONPATH=lib python3 lib/render.py "${args[@]}"
+PYTHONPATH=lib python3 lib/render.py "${args[@]}"            # standalone form
+PYTHONPATH=lib python3 lib/render.py --fragment "${args[@]}" # the pre-v3 drop-in
 ```

@@ -1,0 +1,109 @@
+// Speaker EQ entries for the Omarchy menu (Super+Space).
+//
+// Merged into ~/.config/omarchy/extensions/omarchy-menu.jsonc by
+// plugin/install.sh; removed again by plugin/uninstall.sh. The file
+// hot-reloads on save, so a merge takes effect without restarting the shell.
+//
+// Icons are LITERAL Nerd Font glyphs, never \uXXXX escapes. These live outside
+// the BMP, so an escape needs a correct surrogate pair -- easy to get wrong and
+// very hard to spot afterwards. Every glyph below is copied from a menu file
+// that already renders on this machine.
+//
+//   "when"    hides a row until the thing it drives actually exists
+//   "checked" appends a checkmark while the condition holds
+//
+// The v3-only rows gate on `omarchy-eq help` mentioning the subcommand rather
+// than on a version number, so a machine still running v2 quietly hides them
+// instead of offering an entry that dies with a usage error.
+{
+  "eq": {
+    "icon": "󰃃",
+    "label": "Speaker EQ",
+    "aliases": [
+      "audio",
+      "sound",
+      "equalizer",
+      "speakers",
+      "headphones"
+    ],
+    "description": "Measured per-device EQ profiles, auto-switching and clean mic"
+  },
+
+  "eq.switch": {
+    "icon": "󰔫",
+    "label": "Switch Profile",
+    "description": "Pick a profile for the current output",
+    "action": "omarchy-eq-profile",
+    "when": "omarchy-eq ab list >/dev/null 2>&1"
+  },
+  "eq.cycle": {
+    "icon": "󰁖",
+    "label": "Cycle Profile",
+    "description": "Next EQ profile (also Super+Alt+E)",
+    "action": "omarchy-eq ab",
+    "when": "omarchy-eq ab list >/dev/null 2>&1"
+  },
+  "eq.autoswitch": {
+    "icon": "󰑓",
+    "label": "Auto-switch per Output",
+    "description": "Follow the output device and restore its last profile",
+    "action": "omarchy-eq-autoswitch toggle",
+    "when": "omarchy-eq help 2>/dev/null | grep -q 'omarchy-eq autoswitch'",
+    "checked": "omarchy-eq autoswitch status 2>/dev/null | grep -qx 'autoswitch : on'"
+  },
+
+  "eq.fetch": {
+    "icon": "󰖟",
+    "label": "Fetch Preset (AutoEq)",
+    "description": "Search the AutoEq database for this output and import it",
+    "action": "omarchy-launch-tui omarchy-eq-term fetch",
+    "when": "omarchy-eq help 2>/dev/null | grep -q 'omarchy-eq fetch'"
+  },
+  "eq.import": {
+    "icon": "󰉉",
+    "label": "Import Preset File",
+    "description": "ParametricEQ / FixedBandEQ / GraphicEQ .txt, or a .wav impulse response",
+    "action": "omarchy-eq-import"
+  },
+
+  "eq.mic": {
+    "icon": "󰅬",
+    "label": "Clean Mic (RNNoise)",
+    "description": "Toggle the noise-suppressed capture chain",
+    "action": "omarchy-eq mic toggle",
+    "checked": "pactl list short sources 2>/dev/null | grep -q omarchy_mic_clean"
+  },
+
+  "eq.curve": {
+    "icon": "󰃃",
+    "label": "Curve & Profiles",
+    "description": "Measured response, EQ curves and live switching",
+    "action": "omarchy-launch-tui omarchy-eq-term tui",
+    "when": "omarchy-eq ab list >/dev/null 2>&1"
+  },
+  "eq.devices": {
+    "icon": "󰓃",
+    "label": "Outputs",
+    "description": "Speakers, headsets and what each one has",
+    "action": "omarchy-launch-tui omarchy-eq-term devices"
+  },
+  "eq.measure": {
+    "icon": "󰄨",
+    "label": "Re-measure Speakers",
+    "description": "Two-position measurement, then rebuild (~7 min, audible)",
+    "action": "omarchy-launch-tui omarchy-eq-term calibrate"
+  },
+  "eq.doctor": {
+    "icon": "󰒡",
+    "label": "Audio Diagnostics",
+    "description": "Show audio state and diagnose problems",
+    "action": "omarchy-launch-tui omarchy-eq-term doctor"
+  },
+  "eq.reset": {
+    "icon": "󰜺",
+    "label": "Remove EQ",
+    "description": "Delete the profiles and restore raw output",
+    "action": "omarchy-launch-tui omarchy-eq-term reset",
+    "when": "omarchy-eq ab list >/dev/null 2>&1"
+  }
+}
