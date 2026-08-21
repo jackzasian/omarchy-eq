@@ -20,9 +20,10 @@ Panel {
   property var profiles: []
   property var status: ({ active: "", device: "", tag: "", remembered: "" })
   property bool autoswitchOn: false
+  property var streams: []
   property bool haveTool: true
 
-  readonly property string barText: Model.barLabel(root.status.active)
+  readonly property string barText: Model.barLabel(root.status.active, root.streams)
   readonly property string heroSubtitle: {
     if (!root.haveTool) return "omarchy-eq is not installed"
     if (!root.status.device) return "No output"
@@ -43,6 +44,7 @@ Panel {
   function refresh() {
     if (!statusProc.running) statusProc.running = true
     if (!autoProc.running) autoProc.running = true
+    if (!playingProc.running) playingProc.running = true
     if (opened && !listProc.running) listProc.running = true
   }
 
@@ -97,6 +99,15 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: { root.profiles = Model.parseProfiles(text); root.clampCursor() }
+    }
+  }
+
+  Process {
+    id: playingProc
+    command: ["omarchy-eq", "route", "playing"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.streams = Model.parsePlaying(text)
     }
   }
 
@@ -252,6 +263,55 @@ Panel {
         PanelSeparator {
           foreground: root.bar.foreground
           visible: root.profiles.length > 0
+        }
+
+        // ---------- Where each app's audio is actually going ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(4)
+          visible: root.streams.length > 0
+
+          Text {
+            text: "PLAYING THROUGH"
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1.2
+          }
+
+          Repeater {
+            model: root.streams
+            delegate: Item {
+              required property var modelData
+              width: column.width
+              implicitHeight: appName.implicitHeight
+
+              Text {
+                id: appName
+                anchors.left: parent.left
+                text: (modelData.playing ? "󰐊 " : "󰏤 ") + modelData.app
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                opacity: modelData.playing ? 1.0 : 0.55
+              }
+
+              Text {
+                anchors.right: parent.right
+                text: Model.prettyKey(modelData.profile)
+                color: Qt.darker(root.bar.foreground, 1.3)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                opacity: modelData.playing ? 1.0 : 0.55
+              }
+            }
+          }
+        }
+
+        PanelSeparator {
+          foreground: root.bar.foreground
+          visible: root.streams.length > 0
         }
 
         // ---------- Auto-switching toggle ----------

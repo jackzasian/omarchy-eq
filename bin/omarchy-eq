@@ -1055,6 +1055,9 @@ cmd_route() {
        Omit the profile to remove the rule; use '-' to leave that app alone."
       py routing.py rule "$1" "${2:-}"
       info "rule saved"; cmd_route status ;;
+    playing)
+      # Read by the bar widget, so it stays machine-readable and silent.
+      py routing.py playing ;;
     once)
       need_pa
       py routing.py plan | grep -q . || { info "nothing to route"; return 0; }
@@ -1076,7 +1079,7 @@ cmd_route() {
       else
         echo '  (nothing -- no stream matches a rule, or they are already there)'
       fi ;;
-    *) die "usage: omarchy-eq route [enable|disable|status|once|rule <app> [profile]]" ;;
+    *) die "usage: omarchy-eq route [enable|disable|status|once|playing|rule <app> [profile]]" ;;
   esac
 }
 

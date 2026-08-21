@@ -69,13 +69,39 @@ function parseAutoswitch(raw) {
     return /^autoswitch\s*:\s*on\s*$/m.test(String(raw))
 }
 
-// What the bar shows. A profile name is more useful than an icon alone, but
-// only when it says something: "flat" means no EQ is doing anything, so the
-// bare icon is the honest signal there.
-function barLabel(active) {
-    if (!active || active === "flat" || active === "unknown")
+// `routing.py playing` prints: stream<TAB>app<TAB>profile<TAB>playing(0|1)
+function parsePlaying(raw) {
+    var out = []
+    if (!raw)
+        return out
+    var lines = String(raw).split("\n")
+    for (var i = 0; i < lines.length; i++) {
+        var f = lines[i].split("\t")
+        if (f.length < 4 || f[0] !== "stream")
+            continue
+        out.push({ app: f[1], profile: f[2], playing: f[3] === "1" })
+    }
+    return out
+}
+
+// What the bar shows.
+//
+// The default sink is the wrong answer whenever per-stream routing is doing its
+// job: routing deliberately leaves the default alone and moves the audio
+// instead, so a bar reading the default sits unchanged all day while the sound
+// moves around behind it. That is indistinguishable from routing being broken,
+// and it is exactly what it looked like.
+//
+// So: if something is actually playing, show where *that* is going. Fall back to
+// the default only when nothing is.
+function barLabel(active, streams) {
+    var key = active
+    var playing = (streams || []).filter(function (s) { return s.playing })
+    if (playing.length > 0)
+        key = playing[0].profile
+    if (!key || key === "flat" || key === "unknown")
         return "󰃟"
-    return "󰃟 " + prettyKey(active).toUpperCase()
+    return "󰃟 " + prettyKey(key).toUpperCase()
 }
 
 // Fetched and imported profiles are keyed like `sennheiser_hd_650`.
