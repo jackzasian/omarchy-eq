@@ -59,6 +59,7 @@ notification naming the active profile and its curve.
 |---|---|
 | `omarchy-eq devices` | list outputs and what each one has |
 | `omarchy-eq autoswitch enable` | follow the output device automatically |
+| `omarchy-eq route enable` | send each app's audio to the profile that suits it |
 | `omarchy-eq fetch [model]` | search the AutoEq database and import a preset |
 | `omarchy-eq ab list\|status` | show profiles / what's active |
 | `omarchy-eq tui` | measured curve + EQ curve + profile switcher |
@@ -130,6 +131,45 @@ publishes a mono one at 8 or 16 kHz. Same hardware, different response — so
 they get separate tags (`bt8ae6` and `bt8ae6hs`), separate measurements and
 separate EQ. Correcting the call profile with a curve derived from A2DP would
 be boosting treble the link never carries.
+
+## Following the application, not just the device
+
+Auto-switching answers "what am I listening *through*". This answers "what am I
+listening *to*", which is a different question:
+
+```bash
+omarchy-eq route enable
+```
+
+Streams are then sent to the profile that suits them — **individually**. Spotify
+plays through `music` while a video call plays through `voice`, at the same
+time. That costs nothing to arrange, because every profile is already its own
+sink; the streams simply get pointed somewhere else.
+
+Three signals, most specific first:
+
+- **What is actually playing.** Spotify's MPRIS track id distinguishes
+  `/track/` from `/episode/`, which is the only way to tell a song from a
+  podcast — both arrive on one stream with identical properties otherwise. A
+  podcast gets the speech curve and goes back to the music curve afterwards.
+- **The application.** `omarchy-eq route rule <app> <profile>` writes your own;
+  the built-ins cover the obvious music and conferencing apps. `-` as the
+  profile means "leave this app alone", which is different from removing the
+  rule — removing it restores the built-in you were trying to suppress.
+- **`media.role`.** PipeWire's own hint, where an app sets one. Notification
+  blips (`event`) and pro audio (`production`) are deliberately left alone.
+
+Anything nothing matches stays on whatever your default is. That is the common
+case and it stays uneventful: routing is for the few streams where the right
+answer is knowable, not a licence to move everything.
+
+**It does not fight you.** Move a stream yourself and it stays moved — the
+watcher notices it is no longer where it put it and backs off, right up until
+the correct answer genuinely changes, which is the whole point of noticing a
+song turning into a podcast.
+
+`omarchy-eq route status` shows the rules and what it would do right now,
+without doing it.
 
 ## Why two measurements
 

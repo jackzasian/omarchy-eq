@@ -48,6 +48,7 @@ WATCH_UNIT="omarchy-eq-autoswitch.service"
 FREQS=(50 63 80 100 125 160 200 250 315 400 500 630 800 1000 1250 1600
        2000 2500 3150 4000 5000 6300 8000 10000 12500 16000)
 
+ROUTE_TICK=5       # seconds; how often to re-check what Spotify is playing
 REPEATS=3          # passes per frequency; the median of these is the reading
 TONE_SEC=1.4
 REC_SEC=1.0
@@ -914,10 +915,29 @@ autoswitch_run() {
   # headset flipping between its A2DP and call profiles, and `server` covers the
   # default sink moving. sink-input is deliberately not watched: it fires on
   # every stream every application opens, and none of that changes the answer.
-  local line
-  while IFS= read -r line; do
+  local routing; routing=$(py routing.py settings | awk -F'\t' '$1=="enabled"{print $2}')
+  (( routing )) && route_once --verbose
+  local line rc
+  # The read timeout doubles as a clock. Spotify moving from a song to a podcast
+  # changes the right answer without emitting any PipeWire event at all -- the
+  # stream is the same stream -- so something has to look periodically.
+  while true; do
+    IFS= read -r -t "$ROUTE_TICK" line; rc=$?
+    if (( rc > 128 )); then
+      (( routing )) && route_once
+      continue                     # timed out: a tick, not an event
+    fi
+    (( rc )) && break              # pactl subscribe died; let systemd restart us
     case "$line" in
       *" on sink "*|*" on card "*|*" on server"*) ;;
+      *" on sink-input "*)
+        # Streams come and go constantly and none of it changes which *device*
+        # is in use, so this only ever feeds routing.
+        if (( routing )); then
+          while read -r -t 0.4 _; do :; done
+          route_once --verbose
+        fi
+        continue ;;
       *) continue ;;
     esac
     # Drain the burst. A single headphone connect emits a card change, a sink
@@ -925,6 +945,7 @@ autoswitch_run() {
     # acting on the first of those means acting on a half-built graph.
     while read -r -t 0.5 _; do :; done
     autoswitch_once --verbose || true
+    (( routing )) && route_once --verbose
   done < <(pactl subscribe 2>/dev/null)
 }
 
@@ -978,6 +999,81 @@ cmd_autoswitch() {
     once) need_pa; autoswitch_once --verbose ;;
     run)  autoswitch_run ;;
     *) die "usage: omarchy-eq autoswitch [enable|disable|status|once|run] [--fetch] [--quiet]" ;;
+  esac
+}
+
+# ---- per-stream routing -----------------------------------------------------
+# autoswitch follows the device; this follows the stream. Spotify can be on the
+# music curve while a call is on the speech one, because every profile is
+# already its own sink -- nothing has to be swapped, the streams just get
+# pointed somewhere else.
+
+# What we last sent each stream to. The point is to not fight the user: if a
+# stream is no longer where we put it, somebody moved it deliberately and we
+# leave it alone, right up until the *right* answer changes (a song becoming a
+# podcast), at which point acting again is the whole feature.
+declare -A ROUTED=()
+
+route_once() { # [--verbose]
+  local verbose=0; [[ ${1:-} == --verbose ]] && verbose=1
+  local id target app why moved=0
+  while IFS=$'\t' read -r _kind id target app why; do
+    [[ -n $id && -n $target ]] || continue
+    local now
+    now=$(pactl list short sink-inputs 2>/dev/null | awk -v i="$id" '$1==i{print $2}')
+    now=$(pactl list short sinks 2>/dev/null | awk -v d="$now" '$1==d{print $2}')
+    if [[ -n ${ROUTED[$id]:-} && ${ROUTED[$id]} == "$target" && $now != "$target" ]]; then
+      (( verbose )) && info "$app: left where you moved it"
+      continue
+    fi
+    if pactl move-sink-input "$id" "$target" >/dev/null 2>&1; then
+      ROUTED[$id]="$target"; moved=$(( moved + 1 ))
+      (( verbose )) && info "$app -> ${target#eq_*_} ($why)"
+    fi
+  done < <(py routing.py plan)
+  return 0
+}
+
+cmd_route() {
+  local action="${1:-status}"; shift || true
+  case "$action" in
+    enable)
+      py routing.py set enabled=1 || die "could not save settings"
+      info "per-stream routing is on"
+      have_systemd && systemctl --user is-active "$WATCH_UNIT" >/dev/null 2>&1 || \
+        info "note: it is applied by the autoswitch watcher -- turn that on with:
+       omarchy-eq autoswitch enable"
+      cmd_route status ;;
+    disable)
+      py routing.py set enabled=0
+      info "per-stream routing is off" ;;
+    rule)
+      [[ -n ${1:-} ]] || die "usage: omarchy-eq route rule <app> [profile]
+       Omit the profile to remove the rule; use '-' to leave that app alone."
+      py routing.py rule "$1" "${2:-}"
+      info "rule saved"; cmd_route status ;;
+    once)
+      need_pa
+      py routing.py plan | grep -q . || { info "nothing to route"; return 0; }
+      route_once --verbose ;;
+    status)
+      local kind a b
+      while IFS=$'\t' read -r kind a b; do
+        case "$kind" in
+          enabled) printf 'routing    : %s\n' "$( [[ $a == 1 ]] && echo on || echo off )" ;;
+          content) printf 'spotify    : %s\n' "$( [[ $a == 1 ]] && echo 'songs -> music, podcasts -> voice' || echo 'not inspected' )" ;;
+          app)     printf '  %-18s %s\n' "$a" "$b" ;;
+        esac
+      done < <(py routing.py settings)
+      echo
+      echo 'would route now:'
+      local out; out=$(py routing.py plan)
+      if [[ -n $out ]]; then
+        printf '%s\n' "$out" | awk -F'\t' '{printf "  %-14s -> %-14s %s\n", $4, $3, $5}'
+      else
+        echo '  (nothing -- no stream matches a rule, or they are already there)'
+      fi ;;
+    *) die "usage: omarchy-eq route [enable|disable|status|once|rule <app> [profile]]" ;;
   esac
 }
 
@@ -1122,6 +1218,7 @@ omarchy-eq $VERSION -- measure, correct and A/B your speakers, per output device
   omarchy-eq tui                curve + profile switcher in the terminal
 
   omarchy-eq autoswitch enable  follow the output device automatically
+  omarchy-eq route enable       per-app routing: Spotify to music, calls to voice
   omarchy-eq fetch [model]      find a preset in the AutoEQ database and import it
 
   omarchy-eq measure [--again]  play test tones, record on the internal mic
@@ -1161,6 +1258,7 @@ case "${1:-help}" in
   import)   shift; cmd_import "$@" ;;
   fetch)    shift; cmd_fetch "$@" ;;
   autoswitch) shift; cmd_autoswitch "$@" ;;
+  route)    shift; cmd_route "$@" ;;
   export)   shift; cmd_export "$@" ;;
   mic)      shift; cmd_mic "$@" ;;
   doctor)   shift; cmd_doctor "$@" ;;
