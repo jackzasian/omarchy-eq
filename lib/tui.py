@@ -11,7 +11,6 @@ curses, run normally, and come back.
 import curses
 import json
 import math
-import os
 import subprocess
 import sys
 
@@ -71,7 +70,7 @@ def measured(resp):
     return [(f, d - ref) for f, d in pts], dropped
 
 
-def draw_plot(win, top, height, width, series, dropped, lo, hi, pairs):
+def draw_plot(win, top, height, width, series, dropped, lo, hi):
     """One panel: dB axis, braille curves, log frequency ticks."""
     pad, gutter = 6, 1
     cw = width - pad - gutter
@@ -179,7 +178,7 @@ def run(stdscr, exe, devname):
             series = [(mpts, CY | curses.A_DIM)]
             if eqpts:
                 series.append((eqpts, YE))
-            draw_plot(stdscr, 3, ph, w, series, dropped, -36, 18, None)
+            draw_plot(stdscr, 3, ph, w, series, dropped, -36, 18)
             legend = "measured" + ("   corrected: %s" % chosen if eqpts else "")
             stdscr.addstr(2, 1, legend[:w - 2], curses.A_DIM)
             if dropped:

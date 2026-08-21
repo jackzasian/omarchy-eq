@@ -281,10 +281,9 @@ def context(spec=None):
     prof = _read(profiles_path(sink), {}) or {}
     for key, p in prof.get("profiles", {}).items():
         rows.append("profile\t%s\t%s" % (key, describe.summarise(p)))
-    data = _read(response_path(sink))
-    if data:
-        good = sum(1 for v in data.get("merged", {}).values() if v.get("valid"))
-        rows.append("measurement\t%d\t%d" % (len(data.get("runs", [])), good))
+    # Run/point counts deliberately are not emitted here: `state_for` has no
+    # branch for them, and the two places that show counts -- `devices` and
+    # `doctor` -- read them from devices_status() and summary() instead.
     return rows
 
 

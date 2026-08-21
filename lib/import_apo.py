@@ -16,7 +16,6 @@ broadband stage: folding it into the per-band gains is not equivalent, because
 the preamp applies at every frequency and the band gains do not.
 """
 import json
-import math
 import os
 import re
 import sys

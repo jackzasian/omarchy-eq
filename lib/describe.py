@@ -5,6 +5,7 @@ A single process for the whole file: `ab` used to fork python once per profile
 just to build these strings.
 """
 import json
+import math
 import sys
 
 
@@ -13,7 +14,6 @@ def summarise(profile):
     for f in profile["filters"]:
         c = f["control"]
         if f["label"] == "linear":
-            import math
             bits.append("pre%+.1fdB" % (20.0 * math.log10(max(float(c.get("mult", 1.0)), 1e-9))))
         elif "Gain" in c:
             bits.append("%+g@%g" % (c["Gain"], c["Freq"]))
