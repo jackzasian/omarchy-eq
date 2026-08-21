@@ -330,13 +330,22 @@ There are two ways in. As an **Omarchy plugin**, which is the tidy one:
 
 ```bash
 omarchy plugin add https://github.com/jackzasian/omarchy-eq.git --enable
-~/.config/omarchy/plugins/jackzasian.eq/install.sh
+~/.config/omarchy/plugins/jackzasian.eq/plugin/install.sh
 ```
 
-That adds the menu entries, a profile picker that lists whatever the current
-output actually has, and optional hotkeys. See [`plugin/README.md`](plugin/README.md).
+That adds a bar item showing which profile your audio is actually going through,
+menu entries, a profile picker listing whatever the current output has, and
+optional hotkeys. See [`plugin/README.md`](plugin/README.md) for how each piece
+works and how to configure it.
+
 The second step is separate because Omarchy reads a single user-owned menu file:
 entries have to be merged into yours, and that is not something to do silently.
+`--enable` matters too -- without it the plugin installs but stays disabled and
+nothing appears on the bar.
+
+`manifest.json` sits at the repository root because that is where
+`omarchy plugin add` validates it; the plugin's own files stay under
+[`plugin/`](plugin/), which the manifest points at.
 
 Or by hand, which is what the rest of this section describes.
 
