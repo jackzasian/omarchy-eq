@@ -7,13 +7,22 @@
   "license": "MIT",
   "description": "Measured per-device PipeWire EQ: menu entries and a hotkey for omarchy-eq profile switching, automatic per-output switching, AutoEq preset fetch/import, the curve TUI, re-measurement and diagnostics.",
   "kinds": [
+    "bar-widget",
     "service"
   ],
   "activation": "on-demand",
   "entryPoints": {
+    "barWidget": "Panel.qml",
     "service": "Service.qml"
   },
   "omarchy": {
     "homepage": "https://github.com/jackzasian/omarchy-eq"
+  },
+  "barWidget": {
+    "displayName": "Speaker EQ",
+    "description": "Bar item showing the active EQ profile for the current output; popup lists every profile that output actually has and toggles automatic per-output switching.",
+    "category": "Audio",
+    "defaultSection": "right",
+    "allowMultiple": false
   }
 }

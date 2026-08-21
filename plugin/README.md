@@ -7,12 +7,31 @@ preset import.
 The plugin is the *desktop wiring*. The tool itself is a separate install — the
 plugin will tell you if it is missing.
 
+## The bar widget
+
+The bar shows which profile the current output is on — `󰃟 BALANCED` — and just
+the icon when nothing is being corrected, because "flat" means no EQ is doing
+anything and saying so in words would be noise.
+
+Click it for the profiles **that output actually has**, with the active one
+marked, plus a toggle for automatic per-output switching. The list is read from
+`omarchy-eq ab list` each time rather than hardcoded: profiles are per-device
+and open-ended, so plugging in headphones changes what this popup contains.
+
+It polls every 8 seconds while closed. That is not laziness about latency — with
+auto-switching on, the profile can change without anyone touching the bar, and
+the label has to be right rather than instant.
+
 ## Install
 
 ```bash
 omarchy plugin add https://github.com/jackzasian/omarchy-eq.git --enable
 ~/.config/omarchy/plugins/jackzasian.eq/install.sh
 ```
+
+`--enable` turns the bar widget on. If you add it without that flag, the plugin
+installs but stays *disabled* and nothing appears — enable it afterwards with
+`omarchy plugin enable jackzasian.eq right`.
 
 The second step is separate on purpose. Omarchy copies a plugin folder into
 place, but the menu is a single user-owned file that every extension shares, so
