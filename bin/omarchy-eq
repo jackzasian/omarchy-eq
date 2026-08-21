@@ -872,7 +872,7 @@ autoswitch_once() { # [--verbose] [depth]
         # fallback quotes the device name, and single quotes nested inside a
         # parameter expansion inside double quotes is a construct nobody should
         # have to squint at to confirm it expands.
-        [[ -n $why ]] || why="auto-setup found nothing for '"$label"'"
+        [[ -n $why ]] || why="auto-setup found nothing for '$label'"
         (( verbose )) && warn "$why"
         return 1
       fi
