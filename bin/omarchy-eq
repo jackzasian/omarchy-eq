@@ -13,6 +13,18 @@ LIB="$ROOT/lib"
 [[ -f $LIB/generate.py ]] || LIB="/usr/share/omarchy-eq/lib"
 export PYTHONPATH="$LIB${PYTHONPATH:+:$PYTHONPATH}"
 
+# The sweep pipes levels through sort and awk as decimal text. Confirmed against a
+# locally built de_DE.UTF-8: `sort -g` converts with the locale's strtod, so under
+# a comma-decimal locale "-45.23" stops at the '.' and every repeat of a band
+# collapses to the same integer. The repeats then compare equal, the tie falls
+# back to string order, and the median is picked from a mis-sorted list -- -45.23
+# where C gives -45.90. It fails silently: the reading stays a well-formed number,
+# it is just the wrong one.
+# gawk was *not* affected: outside --posix both -v assignment and printf "%.2f"
+# stay dot-decimal, so nothing in this pipeline emits a comma for python's float()
+# to reject. Only sort needed fixing; the pin below is the general guard.
+export LC_NUMERIC=C
+
 CONFD="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d"
 EQ_CONF="$CONFD/99-omarchy-eq.conf"
 MIC_CONF="$CONFD/98-omarchy-mic.conf"
@@ -31,6 +43,11 @@ die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m::\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
 need() { command -v "$1" >/dev/null || die "missing required command: $1"; }
+# An option with nothing after it would otherwise abort on bash's own
+# "$2: unbound variable" under set -u, which names neither the flag nor the fix.
+need_val() { # flag value [hint]
+  [[ -n ${2:-} ]] || die "$1 needs a value${3:+ -- $3}"
+}
 # pactl fails with "Connection refused" when XDG_RUNTIME_DIR is unset (e.g. a
 # sanitised env). Without this guard `ab` would silently read an empty default
 # sink, decide the current profile is unknown, and jump to the first profile
@@ -39,7 +56,10 @@ need_pa() {
   pactl info >/dev/null 2>&1 || \
     die "cannot reach PipeWire via pactl (is XDG_RUNTIME_DIR set?)"
 }
-py() { python3 "$LIB/$@"; }
+# "$LIB/$1" then the rest: "$LIB/$@" glues the prefix onto only the first word
+# and leaves the others bare, which happens to be right here but reads as though
+# every argument were prefixed.
+py() { local s="$1"; shift; python3 "$LIB/$s" "$@"; }
 
 # ---- device detection -------------------------------------------------------
 # Prefer the built-in PCI codec; USB/BT devices are not what we want to EQ.
@@ -64,16 +84,17 @@ RESPONSE="" PROFILES="" DEVDIR="" STATE_FALLBACK=""
 declare -a PROFILE_KEYS=()
 declare -A PROFILE_DESC=()
 state_for() {
-  local kind key val line
+  local kind key val
   PROFILE_KEYS=(); PROFILE_DESC=()
   while IFS=$'\t' read -r kind key val; do
     case "$kind" in
       error)   die "$key" ;;
+      # `codec` is emitted too, but the codec is already surfaced by `devices`
+      # and the TUI, which read it straight from devices.py.
       device)  case "$key" in
                  name) DEV_NAME="$val" ;; tag) DEV_TAG="$val" ;;
                  label) DEV_LABEL="$val" ;; kind) DEV_KIND="$val" ;;
                  measurable) DEV_MEASURABLE="$val" ;;
-                 codec) DEV_CODEC="$val" ;;
                esac ;;
       path)    case "$key" in
                  dir) DEVDIR="$val" ;; response) RESPONSE="$val" ;;
@@ -157,6 +178,7 @@ PY
 # measure forces volume and unmutes. Restore on *any* exit, including Ctrl-C --
 # a long audible measurement is the thing users interrupt most.
 SAVED_SINK="" SAVED_VOL="" SAVED_MUTE="" SAVED_SRC="" SAVED_SRC_MUTE="" TMPDIR_M=""
+RESTORED=0
 save_audio() {
   SAVED_SINK="$1"; SAVED_SRC="$2"
   # calibrate runs measure twice in one process. The second run must not "save"
@@ -166,7 +188,12 @@ save_audio() {
   SAVED_MUTE=$(pactl get-sink-mute "$1" 2>/dev/null | awk '{print $2}')
   SAVED_SRC_MUTE=$(pactl get-source-mute "$2" 2>/dev/null | awk '{print $2}')
 }
+# Runs from both the INT/TERM handler and the EXIT trap, so it must be safe to
+# call twice -- restoring a volume twice is harmless, but the second rm -rf
+# would race a tempdir another command had already recreated.
 restore_audio() {
+  (( RESTORED )) && return 0
+  RESTORED=1
   [[ -n $SAVED_SINK && -n $SAVED_VOL ]] && \
     pactl set-sink-volume "$SAVED_SINK" "$SAVED_VOL" >/dev/null 2>&1
   [[ $SAVED_MUTE == yes ]] && pactl set-sink-mute "$SAVED_SINK" 1 >/dev/null 2>&1
@@ -184,8 +211,8 @@ cmd_measure() {
       --again)    again=1 ;;
       --fast)     fast=1 ;;
       --yes|-y)   assume_yes=1 ;;
-      --device)   spec="$2"; shift ;;
-      --position) position="$2"; shift ;;
+      --device)   need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift ;;
+      --position) need_val --position "${2:-}"; position="$2"; shift ;;
       *) die "usage: omarchy-eq measure [--again] [--fast] [--yes] [--device D] [--position NAME]" ;;
     esac
     shift
@@ -214,7 +241,12 @@ cmd_measure() {
 
   [[ -n $TMPDIR_M ]] && rm -rf "$TMPDIR_M"
   TMPDIR_M=$(mktemp -d)
-  trap restore_audio EXIT INT TERM
+  # A bare `trap ... INT` handler *returns* into the loop it interrupted: the
+  # volume would be restored and the tempdir deleted while the sweep carried on
+  # playing tones, recording -120 for every remaining band and then writing that
+  # wreckage to response.json. Ctrl-C has to actually leave.
+  trap restore_audio EXIT
+  trap 'restore_audio; exit 130' INT TERM
 
   info "device : $DEV_LABEL"
   info "sink   : $sink"
@@ -282,7 +314,9 @@ EOF
       vals+=("$db")
     done
     # median of the repeats: one keystroke or fan spin-up cannot move it
-    local med; med=$(printf '%s\n' "${vals[@]}" | sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
+    # LC_ALL=C, not just the LC_NUMERIC pin at the top: LC_ALL outranks
+    # LC_NUMERIC, so a user who exports it would otherwise defeat the pin here.
+    local med; med=$(printf '%s\n' "${vals[@]}" | LC_ALL=C sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
     local floor="${FLOOR[$f]:--120}"
     local snr; snr=$(awk -v a="$med" -v b="$floor" 'BEGIN{printf "%.2f", a-b}')
     printf '%s %s %s\n' "$f" "$med" "$snr" >> "$run"
@@ -336,8 +370,8 @@ cmd_calibrate() {
   local music=auto fast=() spec="" dev=()
   while (( $# )); do
     case "$1" in
-      --play)   music="$2"; shift ;;
-      --device) spec="$2"; dev=(--device "$2"); shift ;;
+      --play)   need_val --play "${2:-}" "a file, or 'none'"; music="$2"; shift ;;
+      --device) need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; dev=(--device "$2"); shift ;;
       --fast)   fast=(--fast) ;;
       *) die "usage: omarchy-eq calibrate [--device D] [--play FILE|none] [--fast]" ;;
     esac
@@ -397,7 +431,7 @@ EOF
 }
 
 cmd_generate() {
-  local spec=""; [[ ${1:-} == --device ]] && { spec="$2"; shift 2; }
+  local spec=""; [[ ${1:-} == --device ]] && { need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift 2; }
   state_for "$spec"
   [[ -f $RESPONSE ]] || die "no measurement found -- run: omarchy-eq measure"
   py generate.py "$RESPONSE" "$PROFILES" || die "generation failed"
@@ -453,7 +487,7 @@ cmd_devices() {
 }
 
 cmd_export() {
-  local spec=""; [[ ${1:-} == --device ]] && { spec="$2"; shift 2; }
+  local spec=""; [[ ${1:-} == --device ]] && { need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift 2; }
   state_for "$spec"
   [[ -f $RESPONSE ]] || die "no measurement found -- run: omarchy-eq measure"
   py state.py export "$RESPONSE"
@@ -493,7 +527,7 @@ cmd_mic() {
 cmd_ab() {
   need_pa
   local spec=""
-  if [[ ${1:-} == --device ]]; then spec="$2"; shift 2; fi
+  if [[ ${1:-} == --device ]]; then need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift 2; fi
   state_for "$spec"
   if (( ! ${#PROFILE_KEYS[@]} )); then
     if [[ $DEV_MEASURABLE == 1 ]]; then
@@ -553,7 +587,7 @@ cmd_ab() {
 
 cmd_tui() {
   need python3
-  local spec=""; [[ ${1:-} == --device ]] && { spec="$2"; shift 2; }
+  local spec=""; [[ ${1:-} == --device ]] && { need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift 2; }
   state_for "$spec"
   py tui.py "$SELF" "$DEV_NAME"
 }
@@ -562,7 +596,7 @@ cmd_import() {
   local spec="" file="" name=""
   while (( $# )); do
     case "$1" in
-      --device) spec="$2"; shift ;;
+      --device) need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift ;;
       *) if [[ -z $file ]]; then file="$1"; else name="$1"; fi ;;
     esac
     shift

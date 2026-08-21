@@ -206,3 +206,44 @@ interesting tests are the ones pinning down *why* the code is shaped the way it
 is — that `goertzel` badly underreads a warble (which is why `band_level` exists),
 that the music profile can never end up less airy than balanced, and that a
 measurement disagreeing between positions gets thrown away.
+
+### Verifying by hand
+
+`generate` and `apply` are not read-only. A bare `omarchy-eq generate` rewrites
+`profiles.json` for the *real* device under `~/.local/state/omarchy-eq/`, and
+`apply` overwrites the live `99-omarchy-eq.conf` and restarts PipeWire. Neither
+asks first, and `generate` keeps no backup of the profiles it replaces.
+
+So point them at a scratch state directory:
+
+```bash
+XDG_STATE_HOME=$(mktemp -d) omarchy-eq generate --device builtin
+```
+
+Seed that directory with a copy of the real `response.json` first if you want to
+generate against a genuine measurement:
+
+```bash
+scratch=$(mktemp -d); dev=<sink-name>
+mkdir -p "$scratch/omarchy-eq/devices/$dev"
+cp ~/.local/state/omarchy-eq/devices/$dev/response.json \
+   "$scratch/omarchy-eq/devices/$dev/"
+XDG_STATE_HOME=$scratch omarchy-eq generate --device builtin
+```
+
+`generate` being deterministic from `response.json` is not a licence to run it on
+live state: it only reproduces the installed profiles if they were generated from
+the *current* `response.json`. If a measurement has landed since the last
+`generate`, the on-disk profiles are stale and a "harmless" re-run will silently
+replace them with different numbers — leaving `profiles.json` out of step with the
+`99-omarchy-eq.conf` that is actually loaded.
+
+`doctor`, `ab status`, `devices` and `export` are read-only and safe to run
+against live state. To render the config without installing it, call the library
+directly rather than using `apply`:
+
+```bash
+# Tab-separated, and device labels contain spaces -- split on tabs, not words.
+mapfile -t args < <(PYTHONPATH=lib python3 lib/state.py render-args | tr '\t' '\n')
+PYTHONPATH=lib python3 lib/render.py "${args[@]}"
+```
