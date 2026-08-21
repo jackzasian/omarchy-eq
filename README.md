@@ -171,6 +171,13 @@ song turning into a podcast.
 `omarchy-eq route status` shows the rules and what it would do right now,
 without doing it.
 
+**Seeing it happen.** Routing deliberately leaves the default sink alone — that
+is what lets two apps use two profiles at once — so `ab status` and the menu
+checkmark, which both report the *default*, sit unchanged while the audio moves
+around behind them. That is indistinguishable from routing being broken. The bar
+widget therefore reports where the audio actually is: whatever is playing, not
+whatever is default. `omarchy-eq route playing` prints the same thing.
+
 ## Why two measurements
 
 Measure once and you are not measuring your speaker. You are measuring

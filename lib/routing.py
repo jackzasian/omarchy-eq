@@ -147,10 +147,15 @@ def parse_sink_inputs(text):
         if m:
             if cur:
                 out.append(cur)
-            cur = {"index": m.group(1), "sink": "", "props": {}}
+            cur = {"index": m.group(1), "sink": "", "corked": False,
+                   "props": {}}
         elif cur is not None:
             if line.startswith("Sink:"):
                 cur["sink"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Corked:"):
+                # `pactl list short sink-inputs` has no state column at all, so
+                # whether a stream is actually making sound only appears here.
+                cur["corked"] = line.split(":", 1)[1].strip() == "yes"
             elif " = " in line:
                 k, v = line.split(" = ", 1)
                 cur["props"][k.strip()] = v.strip().strip('"')
@@ -264,6 +269,37 @@ def plan(devs=None):
     return rows
 
 
+def playing(devs=None):
+    """Rows: where each application's audio is actually going, right now.
+
+    The bar needs this because per-stream routing deliberately does not touch
+    the default sink -- so the default, which is what `ab status` reports, stays
+    put while the audio you are listening to moves somewhere else entirely. A
+    bar reading the default would sit there showing the same thing all day while
+    routing worked perfectly behind it, which is indistinguishable from routing
+    not working at all.
+    """
+    import devices as devmod
+
+    devs = devmod.listing() if devs is None else devs
+    dev = devmod.active(devs)
+    if dev is None:
+        return []
+    tag = dev["tag"]
+    names = sink_names()
+    rows = []
+    for st in parse_sink_inputs(_pactl("list", "sink-inputs")):
+        app = st["props"].get("application.name")
+        if not app or st["props"].get("node.name", "").startswith("eq_"):
+            continue
+        on = names.get(st["sink"], "")
+        if not is_ours(on, tag):
+            continue
+        rows.append("stream\t%s\t%s\t%d" % (
+            app, on[len("eq_%s_" % tag):], 0 if st["corked"] else 1))
+    return rows
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "plan"
     if cmd == "plan":
@@ -282,10 +318,13 @@ def main():
         set_routing(**kw)
     elif cmd == "rule":
         set_app_rule(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+    elif cmd == "playing":
+        print("\n".join(playing()))
     elif cmd == "content":
         print(spotify_content() or "")
     else:
-        raise SystemExit("usage: routing.py {plan|settings|set|rule|content}")
+        raise SystemExit(
+            "usage: routing.py {plan|playing|settings|set|rule|content}")
 
 
 if __name__ == "__main__":

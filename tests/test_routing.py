@@ -179,3 +179,29 @@ class TestSpotifyContent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlayingReadout(unittest.TestCase):
+    """What the bar reads. The reason this exists at all is that the default
+    sink is the wrong thing to show while routing is working."""
+
+    CORKED = """Sink Input #10
+\tSink: 43
+\tCorked: no
+\tapplication.name = "Spotify"
+Sink Input #11
+\tSink: 43
+\tCorked: yes
+\tapplication.name = "Zen"
+"""
+
+    def test_corked_is_how_playing_is_known(self):
+        # `pactl list short sink-inputs` has no state column at all, so a
+        # short-form parse cannot tell a playing stream from a paused one.
+        got = routing.parse_sink_inputs(self.CORKED)
+        self.assertFalse(got[0]["corked"])
+        self.assertTrue(got[1]["corked"])
+
+    def test_streams_without_a_corked_line_default_to_playing(self):
+        got = routing.parse_sink_inputs("Sink Input #1\n\tSink: 43\n")
+        self.assertFalse(got[0]["corked"])
