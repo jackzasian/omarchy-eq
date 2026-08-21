@@ -1160,6 +1160,14 @@ cmd_fetch() {
   info "next   : omarchy-eq apply"
 }
 
+# What you are actually listening through, as one bare word.
+# The menu's checkmarks use this rather than `ab status`: `ab status` reports the
+# default sink, which routing deliberately leaves alone, so it happily says
+# `music` while a podcast plays through `voice`.
+cmd_active() {
+  py routing.py effective
+}
+
 cmd_doctor() {
   printf '\033[1momarchy-eq %s\033[0m\n\n' "$VERSION"
   printf 'pipewire      : %s\n' "$(systemctl --user is-active pipewire 2>/dev/null)"
@@ -1221,6 +1229,7 @@ omarchy-eq $VERSION -- measure, correct and A/B your speakers, per output device
   omarchy-eq devices            list outputs and what each one has
   omarchy-eq ab [profile]       switch profile live (no arg = cycle)
   omarchy-eq ab list|status     show profiles / what is active
+  omarchy-eq active             the profile you are actually hearing, one word
   omarchy-eq tui                curve + profile switcher in the terminal
 
   omarchy-eq autoswitch enable  follow the output device automatically
@@ -1265,6 +1274,7 @@ case "${1:-help}" in
   fetch)    shift; cmd_fetch "$@" ;;
   autoswitch) shift; cmd_autoswitch "$@" ;;
   route)    shift; cmd_route "$@" ;;
+  active)   shift; cmd_active "$@" ;;
   export)   shift; cmd_export "$@" ;;
   mic)      shift; cmd_mic "$@" ;;
   doctor)   shift; cmd_doctor "$@" ;;

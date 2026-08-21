@@ -300,6 +300,37 @@ def playing(devs=None):
     return rows
 
 
+def effective(devs=None):
+    """The profile you are actually listening through.
+
+    Not the same question as "what is the default sink", and once routing exists
+    the default is usually the wrong answer: routing moves the audio and leaves
+    the default alone, so a podcast can be playing through `voice` while the
+    default -- and therefore `ab status`, and therefore the menu's checkmark --
+    still says `music`. Anything reporting the active profile to a human wants
+    this, not the default.
+    """
+    import devices as devmod
+
+    devs = devmod.listing() if devs is None else devs
+    dev = devmod.active(devs)
+    if dev is None:
+        return "unknown"
+    default = devmod.default_sink()
+    prefix = "eq_%s_" % dev["tag"]
+    fallback = default[len(prefix):] if default.startswith(prefix) else "flat"
+    return _effective_from_rows(playing(devs), fallback)
+
+
+def _effective_from_rows(rows, fallback):
+    """Split out so the precedence can be tested without a running PipeWire."""
+    for row in rows:
+        parts = row.split("\t")
+        if len(parts) >= 4 and parts[3] == "1":
+            return parts[2]
+    return fallback
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "plan"
     if cmd == "plan":
@@ -318,13 +349,16 @@ def main():
         set_routing(**kw)
     elif cmd == "rule":
         set_app_rule(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+    elif cmd == "effective":
+        print(effective())
     elif cmd == "playing":
         print("\n".join(playing()))
     elif cmd == "content":
         print(spotify_content() or "")
     else:
         raise SystemExit(
-            "usage: routing.py {plan|playing|settings|set|rule|content}")
+            "usage: routing.py {plan|playing|effective|settings|set|rule|"
+            "content}")
 
 
 if __name__ == "__main__":

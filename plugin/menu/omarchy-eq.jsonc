@@ -15,6 +15,11 @@
 // The v3-only rows gate on `omarchy-eq help` mentioning the subcommand rather
 // than on a version number, so a machine still running v2 quietly hides them
 // instead of offering an entry that dies with a usage error.
+//
+// Profile checkmarks test `omarchy-eq active`, not `ab status`. `ab status`
+// reports the *default sink*, which per-stream routing deliberately leaves
+// alone -- so it says "music" while a podcast is playing through "voice", and
+// the menu would cheerfully put its checkmark on the wrong row.
 {
   "eq": {
     "icon": "󰃃",
