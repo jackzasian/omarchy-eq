@@ -136,3 +136,26 @@ class TestFloorLimited(unittest.TestCase):
         data = {"merged": m}
         self.assertEqual([f for f, _ in state.valid_points(data)], [1000.0])
         self.assertEqual([f for f, _ in state.floor_limited_points(data)], [80.0])
+
+
+class TestMigrationIsBuiltinOnly(unittest.TestCase):
+    """Pre-v2 state was always a measurement of the laptop's own drivers.
+
+    Copying it into whichever device was touched first gave a pair of
+    Bluetooth headphones the laptop speaker's highpass and correction curve.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_STATE_HOME"] = os.path.join(self.tmp, "state")
+        os.environ["XDG_DATA_HOME"] = os.path.join(self.tmp, "data")
+        os.makedirs(state.legacy_root(), exist_ok=True)
+        with open(os.path.join(state.legacy_root(), "response.txt"), "w") as fh:
+            fh.write("100 -30.0\n1000 -15.0\n")
+
+    def test_builtin_device_receives_the_legacy_measurement(self):
+        self.assertTrue(state.migrate("alsa_output.pci-x", is_builtin=True))
+
+    def test_non_builtin_device_receives_nothing(self):
+        self.assertEqual(state.migrate("bluez_output.AA_BB.1", is_builtin=False), [])
+        self.assertFalse(os.path.exists(state.response_path("bluez_output.AA_BB.1")))

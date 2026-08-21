@@ -26,7 +26,7 @@
     "label": "Flat",
     "description": "No EQ - raw speakers, the reference",
     "action": "omarchy-eq ab flat",
-    "checked": "pactl get-default-sink | grep -q '^alsa_output'"
+    "checked": "omarchy-eq ab status 2>/dev/null | grep -qx 'active: flat'"
   },
   "eq.balanced": {
     "icon": "󰋋",
@@ -34,7 +34,7 @@
     "description": "Measured correction - general use",
     "action": "omarchy-eq ab balanced",
     "when": "omarchy-eq ab list >/dev/null 2>&1",
-    "checked": "pactl get-default-sink | grep -qx eq_balanced"
+    "checked": "omarchy-eq ab status 2>/dev/null | grep -qx 'active: balanced'"
   },
   "eq.voice": {
     "icon": "󱀄",
@@ -42,7 +42,7 @@
     "description": "Calls and video - forward speech",
     "action": "omarchy-eq ab voice",
     "when": "omarchy-eq ab list >/dev/null 2>&1",
-    "checked": "pactl get-default-sink | grep -qx eq_voice"
+    "checked": "omarchy-eq ab status 2>/dev/null | grep -qx 'active: voice'"
   },
   "eq.music": {
     "icon": "󰔞",
@@ -50,7 +50,7 @@
     "description": "Keeps low-mid warmth, adds air",
     "action": "omarchy-eq ab music",
     "when": "omarchy-eq ab list >/dev/null 2>&1",
-    "checked": "pactl get-default-sink | grep -qx eq_music"
+    "checked": "omarchy-eq ab status 2>/dev/null | grep -qx 'active: music'"
   },
   "eq.mic": {
     "icon": "󰅬",
@@ -65,6 +65,12 @@
     "description": "Measured response, EQ curves and live switching",
     "action": "omarchy-launch-tui omarchy-eq-term tui",
     "when": "omarchy-eq ab list >/dev/null 2>&1"
+  },
+  "eq.devices": {
+    "icon": "󰓃",
+    "label": "Outputs",
+    "description": "Speakers, headsets and what each one has",
+    "action": "omarchy-launch-tui omarchy-eq-term devices"
   },
   "eq.measure": {
     "icon": "󰄨",

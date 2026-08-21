@@ -28,11 +28,13 @@ The optional mic chain needs `noise-suppression-for-voice`.
 ## Use
 
 ```bash
-omarchy-eq measure          # play tones, record on the internal mic (~3 min, audible)
-omarchy-eq measure --again  # second position -- see below, this matters
-omarchy-eq generate         # derive EQ profiles from the measurement
-omarchy-eq apply            # install them as PipeWire sinks
+omarchy-eq calibrate     # the whole thing: measure twice, derive, apply, play
 ```
+
+That is the one command. It sweeps from where the laptop is, asks you to move
+it, sweeps again, derives the profiles, installs them, and puts your music back
+on. About 7 minutes, most of it audible. The steps are also available
+separately (`measure`, `measure --again`, `generate`, `apply`).
 
 Then listen. All profiles load **at once** as separate sinks, so switching is
 instant and happens mid-playback — restarting PipeWire between settings destroys
@@ -50,6 +52,7 @@ notification naming the active profile and its curve.
 
 | Command | |
 |---|---|
+| `omarchy-eq devices` | list outputs and what each one has |
 | `omarchy-eq ab list\|status` | show profiles / what's active |
 | `omarchy-eq tui` | measured curve + EQ curve + profile switcher |
 | `omarchy-eq import <file.txt>` | import an Equalizer APO / AutoEQ preset |
@@ -57,6 +60,40 @@ notification naming the active profile and its curve.
 | `omarchy-eq mic enable\|disable` | RNNoise capture chain |
 | `omarchy-eq doctor` | audio state + diagnosis |
 | `omarchy-eq reset` | remove everything, restore raw output |
+
+## One EQ per output
+
+Every output device gets its own measurement, its own profiles and its own set
+of sinks (`eq_<device>_<profile>`). `omarchy-eq devices` shows what you have:
+
+```
+  TAG        KIND        MEASURE  PROFILES             DEVICE
+* builtin    builtin     yes      3  (2 runs, 19 pts)  Built-in Audio Analog Stereo
+  bt8ae6     headphones  no       1  (imported)        Nothing Ear (open) [aac]
+  sonos      stream      no       -                    Sonos Roam
+```
+
+Every command acts on whichever output you are currently using, or on
+`--device <tag>` if you say so. Switching headphones on and running
+`omarchy-eq ab` just works on the headphones.
+
+**Not everything can be measured.** The measurement plays a tone and records it
+on the laptop's own microphone, so it only means anything when the sound is in
+the room and arrives promptly:
+
+- **Speakers** (built-in, USB, analog) — measurable. This is the interesting case.
+- **Headphones and headsets** — the laptop mic cannot hear them. Measuring is
+  refused; import an [AutoEQ](https://autoeq.app) preset for your model instead.
+- **Network outputs** (Sonos, RAOP) — their buffering puts the tone outside the
+  recording window, so a measurement would be noise. Import-only.
+
+```bash
+omarchy-eq import ~/Downloads/"Nothing Ear ParametricEQ.txt" --device bt8ae6
+omarchy-eq apply
+```
+
+Devices that are not connected are skipped by `apply` — a filter chain pinned to
+an absent sink does nothing useful. Reconnect and re-run `omarchy-eq apply`.
 
 ## Why two measurements
 
@@ -148,8 +185,12 @@ surrogate pair and a wrong one is easy to write and awkward to spot.
 ```
 ~/.local/state/omarchy-eq/devices/<sink>/response.json   measurements
 ~/.local/state/omarchy-eq/devices/<sink>/profiles.json   derived + imported
+~/.local/state/omarchy-eq/devices/<sink>/response.previous.json   the last one
 ~/.config/pipewire/pipewire.conf.d/99-omarchy-eq.conf    generated, do not edit
 ```
+
+A new measurement keeps the one it replaces as `response.previous.json` — a
+sweep costs minutes, so nothing throws one away silently.
 
 State is keyed by output device, and lives under `XDG_STATE_HOME` — separate from
 the installed library. Measurements from before v2 migrate automatically.

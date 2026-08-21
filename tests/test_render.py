@@ -18,10 +18,11 @@ TARGET = "alsa_output.pci-0000_00_1f.3.analog-stereo"
 
 class TestRender(unittest.TestCase):
     def setUp(self):
-        self.out = render.render(PROFILES, TARGET)
+        self.out = render.render([{"tag": "builtin", "target": TARGET,
+                                   "label": "Built-in", "profiles": PROFILES}])
 
     def test_one_sink_per_profile(self):
-        self.assertIn('node.name      = "eq_balanced"', self.out)
+        self.assertIn('node.name      = "eq_builtin_balanced"', self.out)
         self.assertIn("media.class    = Audio/Sink", self.out)
 
     def test_playback_is_pinned_to_the_hardware_sink(self):
@@ -46,7 +47,8 @@ class TestRender(unittest.TestCase):
 
     def test_single_stage_chain_still_renders_valid_links_block(self):
         one = {"solo": {"description": "d", "filters": [PROFILES["balanced"]["filters"][0]]}}
-        out = render.render(one, TARGET)
+        out = render.render([{"tag": "builtin", "target": TARGET,
+                              "label": "Built-in", "profiles": one}])
         self.assertIn("# single-stage chain", out)
         self.assertEqual(out.count("context.modules = ["), 1)
 
@@ -60,3 +62,37 @@ class TestRender(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMultiDevice(unittest.TestCase):
+    def setUp(self):
+        self.out = render.render([
+            {"tag": "builtin", "target": "alsa_output.pci-x",
+             "label": "Built-in", "profiles": PROFILES},
+            {"tag": "bt8ae6", "target": "bluez_output.AA.1",
+             "label": "Nothing Ear", "profiles": PROFILES},
+        ])
+
+    def test_each_device_gets_its_own_sink_names(self):
+        self.assertIn('node.name      = "eq_builtin_balanced"', self.out)
+        self.assertIn('node.name      = "eq_bt8ae6_balanced"', self.out)
+
+    def test_each_device_is_pinned_to_its_own_hardware_sink(self):
+        self.assertIn('target.object       = "alsa_output.pci-x"', self.out)
+        self.assertIn('target.object       = "bluez_output.AA.1"', self.out)
+
+    def test_sink_names_are_unique_across_devices(self):
+        import re
+        names = re.findall(r'node\.name      = "([^"]+)"', self.out)
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_descriptions_name_the_device(self):
+        self.assertIn('"Built-in: Balanced"', self.out)
+        self.assertIn('"Nothing Ear: Balanced"', self.out)
+
+    def test_still_one_module_list(self):
+        self.assertEqual(self.out.count("context.modules = ["), 1)
+        self.assertEqual(self.out.count("{"), self.out.count("}"))
+
+    def test_sink_name_helper_matches_what_is_rendered(self):
+        self.assertEqual(render.sink_name("builtin", "balanced"), "eq_builtin_balanced")

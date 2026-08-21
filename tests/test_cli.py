@@ -104,9 +104,10 @@ class TestPipelineCli(unittest.TestCase):
     def test_generate_then_render_then_describe(self):
         g = run("generate.py", self.resp, self.prof)
         self.assertEqual(g.returncode, 0, g.stderr)
-        r = run("render.py", self.prof, SINK)
+        r = run("render.py", "builtin", SINK, "Built-in Audio", self.prof)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("context.modules", r.stdout)
+        self.assertIn("eq_builtin_balanced", r.stdout)
         d = run("describe.py", self.prof)
         self.assertEqual(d.returncode, 0, d.stderr)
         self.assertTrue(all("\t" in l for l in d.stdout.strip().splitlines()))

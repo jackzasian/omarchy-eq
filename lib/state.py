@@ -192,8 +192,16 @@ def summary(data):
 
 
 # ---- migration --------------------------------------------------------------
-def migrate(sink):
-    """One-shot move of the pre-schema files. Never clobbers newer state."""
+def migrate(sink, is_builtin=True):
+    """One-shot move of the pre-schema files. Never clobbers newer state.
+
+    Only ever targets the built-in speakers. Pre-v2 state had no notion of a
+    device, but it was always a measurement of the laptop's own drivers -- so
+    copying it into whatever device happened to be touched first would give a
+    pair of headphones the laptop's highpass and correction curve.
+    """
+    if not is_builtin:
+        return []
     old_resp = os.path.join(legacy_root(), "response.txt")
     old_prof = os.path.join(legacy_root(), "profiles.json")
     moved = []
@@ -221,6 +229,89 @@ def migrate(sink):
     return moved
 
 
+def context(spec=None):
+    """Everything a subcommand needs about one device, in a single process.
+
+    `ab` used to spend four python startups per invocation -- two for paths, one
+    for migration, one for the descriptions -- which is a lot for something bound
+    to a hotkey and evaluated repeatedly by the menu's guard batch.
+    """
+    import devices as devmod
+    import describe
+
+    devs = devmod.listing()
+    if spec in (None, "", "active"):
+        dev = devmod.active(devs)
+    elif spec == "builtin":
+        dev = devmod.builtin(devs)
+    else:
+        dev = devmod.find(devs, spec)
+    if dev is None:
+        return ["error\tno such output device: %s" % spec]
+
+    sink = dev["name"]
+    rows = ["device\tname\t%s" % sink,
+            "device\ttag\t%s" % dev["tag"],
+            "device\tlabel\t%s" % dev["description"],
+            "device\tkind\t%s" % dev["kind"],
+            "device\tmeasurable\t%d" % (1 if dev["measurable"] else 0),
+            "device\tcodec\t%s" % dev.get("codec", "")]
+    for m in migrate(sink, dev["kind"] == "builtin"):
+        rows.append("migrated\t%s" % m)
+    rows += ["path\tdir\t%s" % device_dir(sink),
+             "path\tresponse\t%s" % response_path(sink),
+             "path\tprofiles\t%s" % profiles_path(sink)]
+    prof = _read(profiles_path(sink), {}) or {}
+    for key, p in prof.get("profiles", {}).items():
+        rows.append("profile\t%s\t%s" % (key, describe.summarise(p)))
+    data = _read(response_path(sink))
+    if data:
+        good = sum(1 for v in data.get("merged", {}).values() if v.get("valid"))
+        rows.append("measurement\t%d\t%d" % (len(data.get("runs", [])), good))
+    return rows
+
+
+def _profile_count(sink):
+    prof = _read(profiles_path(sink), {}) or {}
+    return len(prof.get("profiles", {}))
+
+
+def render_args():
+    """Render arguments for every present device that has profiles.
+
+    Devices that are not connected are skipped: a filter chain pinned to a
+    target.object that does not exist just sits there doing nothing, and
+    cluttering the graph with chains for headphones in a drawer helps no one.
+    Reconnect and re-run apply.
+    """
+    import devices as devmod
+    rows = []
+    for dev in devmod.listing():
+        if _profile_count(dev["name"]):
+            rows.append("\t".join([dev["tag"], dev["name"], dev["description"],
+                                    profiles_path(dev["name"])]))
+    return rows
+
+
+def devices_status():
+    """One row per present device, plus whatever we know about it."""
+    import devices as devmod
+    default = devmod.default_sink()
+    devs = devmod.listing()
+    act = devmod.active(devs, default)
+    rows = []
+    for dev in devs:
+        data = _read(response_path(dev["name"])) or {}
+        runs = len(data.get("runs", []))
+        good = sum(1 for v in data.get("merged", {}).values() if v.get("valid"))
+        rows.append("\t".join([
+            "*" if act and dev["name"] == act["name"] else " ",
+            dev["tag"], dev["kind"], "1" if dev["measurable"] else "0",
+            str(runs), str(good), str(_profile_count(dev["name"])),
+            dev["description"], dev.get("codec", "")]))
+    return rows
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "path":
@@ -236,11 +327,19 @@ def main():
         print(export_txt(_read(sys.argv[2], {})))
     elif cmd == "summary":
         print(summary(_read(sys.argv[2], {})))
+    elif cmd == "context":
+        print("\n".join(context(sys.argv[2] if len(sys.argv) > 2 else None)))
+    elif cmd == "render-args":
+        print("\n".join(render_args()))
+    elif cmd == "devices":
+        print("\n".join(devices_status()))
     elif cmd == "migrate":
         for p in migrate(sys.argv[2]):
             print("migrated: %s" % p)
     else:
-        raise SystemExit("usage: state.py {path|dir|add-run|export|summary|migrate}")
+        raise SystemExit(
+            "usage: state.py {path|dir|context|render-args|devices|add-run|"
+            "export|summary|migrate}")
 
 
 if __name__ == "__main__":
