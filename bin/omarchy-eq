@@ -837,13 +837,12 @@ autoswitch_once() { # [--verbose] [depth]
   local verbose=0; [[ ${1:-} == --verbose ]] && { verbose=1; shift; }
   local depth="${1:-0}"
   local kind key val action="" profile="" target="" reason=""
-  local name="" tag="" label="" narrow=0
+  local name="" tag="" label=""
   while IFS=$'\t' read -r kind key val; do
     case "$kind" in
       error)   (( verbose )) && warn "$key"; return 1 ;;
       device)  case "$key" in
                  name) name="$val" ;; tag) tag="$val" ;; label) label="$val" ;;
-                 narrowband) narrow="$val" ;;
                esac ;;
       action)  action="$key" ;;
       profile) profile="$key" ;;
@@ -868,6 +867,7 @@ autoswitch_once() { # [--verbose] [depth]
       installed=$(printf '%s\n' "$out" | awk -F'\t' '$1=="installed"{print $2"\t"$3}')
       if (( rc )) || [[ -z $installed ]]; then
         local why
+        # shellcheck disable=SC2016  # $1/$2 are awk's fields, not the shell's
         why=$(printf '%s\n' "$out" | awk -F'\t' '$1=="error"{print $2; exit}')
         (( verbose )) && warn "${why:-auto-setup found nothing for '$label'}"
         return 1
@@ -877,7 +877,14 @@ autoswitch_once() { # [--verbose] [depth]
       (( verbose )) && info "installed '$ikey' -- $iname"
       autoswitch_notify "EQ: $label" "auto-configured from AutoEQ: $iname"
       ensure_chains --quiet
-      autoswitch_once $( (( verbose )) && echo --verbose ) 1
+      # Build the argument list explicitly. The obvious
+      # `autoswitch_once $( ... && echo --verbose ) 1` relies on word splitting,
+      # and when verbose is off the empty expansion vanishes and `1` lands in
+      # the flag position instead of the depth position.
+      local -a again=()
+      (( verbose )) && again+=(--verbose)
+      again+=(1)
+      autoswitch_once "${again[@]}"
       return $? ;;
     switch)
       (( verbose )) && info "$label -> $profile ($reason)"
@@ -991,8 +998,10 @@ cmd_fetch() {
   [[ -n $query ]] || { query="$DEV_LABEL"; info "searching for: $query"; }
 
   local -a names=() paths=() sources=() targets=()
-  local sc nm src tgt pth
-  while IFS=$'\t' read -r sc nm src tgt pth; do
+  # The leading score column is consumed and discarded -- results arrive already
+  # ranked, so the number itself is only useful to `autoeq.py match`.
+  local _score nm src tgt pth
+  while IFS=$'\t' read -r _score nm src tgt pth; do
     [[ -n $pth ]] || continue
     names+=("$nm"); sources+=("$src"); targets+=("$tgt"); paths+=("$pth")
   done < <(py autoeq.py search "$query" 12)
@@ -1014,8 +1023,9 @@ cmd_fetch() {
   elif [[ -n $want ]]; then
     pick="$want"
   fi
-  [[ $pick =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#paths[@]} )) || \
+  if ! [[ $pick =~ ^[0-9]+$ ]] || (( pick < 1 || pick > ${#paths[@]} )); then
     die "pick a number between 1 and ${#paths[@]}"
+  fi
   local idx=$(( pick - 1 ))
 
   local tmp; tmp=$(mktemp -d)
