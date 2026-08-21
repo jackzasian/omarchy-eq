@@ -867,9 +867,13 @@ autoswitch_once() { # [--verbose] [depth]
       installed=$(printf '%s\n' "$out" | awk -F'\t' '$1=="installed"{print $2"\t"$3}')
       if (( rc )) || [[ -z $installed ]]; then
         local why
-        # shellcheck disable=SC2016  # $1/$2 are awk's fields, not the shell's
         why=$(printf '%s\n' "$out" | awk -F'\t' '$1=="error"{print $2; exit}')
-        (( verbose )) && warn "${why:-auto-setup found nothing for '$label'}"
+        # Spelled out rather than folded into a ${why:-...} default: the
+        # fallback quotes the device name, and single quotes nested inside a
+        # parameter expansion inside double quotes is a construct nobody should
+        # have to squint at to confirm it expands.
+        [[ -n $why ]] || why="auto-setup found nothing for '"$label"'"
+        (( verbose )) && warn "$why"
         return 1
       fi
       local ikey iname
