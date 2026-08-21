@@ -14,7 +14,14 @@ if ! rows=$(omarchy-eq ab list 2>/dev/null) || [[ -z $rows ]]; then
   exit 1
 fi
 
-active=$(omarchy-eq ab status 2>/dev/null | sed -n 's/^active: //p')
+# `omarchy-eq active`, not `ab status`. `ab status` reports the default sink,
+# which per-stream routing deliberately leaves alone -- so it says "music" while
+# a podcast plays through "voice", and the picker would mark the wrong row.
+# Falls back to the default on a v3.0 install that lacks the subcommand.
+active=$(omarchy-eq active 2>/dev/null) ||
+  active=$(omarchy-eq ab status 2>/dev/null | sed -n 's/^active: //p')
+[[ -n $active ]] ||
+  active=$(omarchy-eq ab status 2>/dev/null | sed -n 's/^active: //p')
 
 # `ab list` prints "  <key>  <description>". Mark the active one so the picker
 # shows what you are already on rather than making you remember.

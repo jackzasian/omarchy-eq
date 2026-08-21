@@ -205,3 +205,24 @@ Sink Input #11
     def test_streams_without_a_corked_line_default_to_playing(self):
         got = routing.parse_sink_inputs("Sink Input #1\n\tSink: 43\n")
         self.assertFalse(got[0]["corked"])
+
+
+class TestEffectiveProfile(unittest.TestCase):
+    """`active` vs `ab status`.
+
+    These disagree by design once routing exists, and every human-facing
+    readout wants the former. Reporting the default while a podcast plays
+    through the speech curve is how this looked broken twice.
+    """
+
+    def test_a_playing_stream_wins_over_the_default(self):
+        rows = ["stream\tZen\tmusic\t0", "stream\tSpotify\tvoice\t1"]
+        self.assertEqual(routing._effective_from_rows(rows, "music"), "voice")
+
+    def test_falls_back_to_the_default_when_nothing_is_playing(self):
+        rows = ["stream\tZen\tmusic\t0", "stream\tSpotify\tvoice\t0"]
+        self.assertEqual(routing._effective_from_rows(rows, "balanced"),
+                         "balanced")
+
+    def test_falls_back_when_no_streams_at_all(self):
+        self.assertEqual(routing._effective_from_rows([], "flat"), "flat")
