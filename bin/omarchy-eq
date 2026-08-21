@@ -1040,9 +1040,12 @@ cmd_route() {
     enable)
       py routing.py set enabled=1 || die "could not save settings"
       info "per-stream routing is on"
-      have_systemd && systemctl --user is-active "$WATCH_UNIT" >/dev/null 2>&1 || \
+      # Routing is a setting; the watcher is what acts on it. Saying so here
+      # saves the "I enabled it and nothing happened" round trip.
+      if ! have_systemd || ! systemctl --user is-active "$WATCH_UNIT" >/dev/null 2>&1; then
         info "note: it is applied by the autoswitch watcher -- turn that on with:
        omarchy-eq autoswitch enable"
+      fi
       cmd_route status ;;
     disable)
       py routing.py set enabled=0
