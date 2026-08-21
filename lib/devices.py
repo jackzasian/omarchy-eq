@@ -12,8 +12,15 @@ actually in the room *and* arrives promptly:
                     arrives long after the recording window, so a measurement
                     would be noise. Import-only.
 
-Classification comes from device.form_factor and device.bus, which PipeWire
-fills in from ALSA and BlueZ.
+A Bluetooth headset is not one output. In A2DP it is a wideband stereo sink;
+switch it to the headset profile for a call and BlueZ tears that sink down and
+publishes a mono one running at 8 or 16 kHz. Same hardware, different response,
+different sink name -- so they get different tags and their own EQ. `narrowband`
+marks the second kind, because correcting treble that the link cannot carry is
+not correction, it is noise.
+
+Classification comes from device.form_factor, device.bus and api.bluez5.profile,
+which PipeWire fills in from ALSA and BlueZ.
 """
 import re
 import subprocess
@@ -31,6 +38,45 @@ FORM_FACTOR_KIND = {
 }
 MEASURABLE = ("builtin", "speaker")
 
+# api.bluez5.profile -> tag suffix. A2DP is the common case and gets no suffix,
+# so an existing bt<addr> tag keeps working; the call profiles are the ones that
+# need telling apart.
+BT_PROFILE_TAG = {
+    "a2dp-sink": "",
+    "bap-sink": "le",
+    "asha-sink": "ha",
+    "headset-head-unit": "hs",
+    "headset-audio-gateway": "ag",
+}
+# HSP/HFP carries 8 kHz (CVSD) or 16 kHz (mSBC) mono. There is no treble up
+# there to correct, and a curve derived from an A2DP measurement would only be
+# boosting link artifacts.
+BT_NARROWBAND = ("headset-head-unit", "headset-audio-gateway")
+
+
+def allowed_rates(default=(48000.0,)):
+    """Sample rates the PipeWire graph is allowed to settle on.
+
+    A filter fitted to an arbitrary curve is only as good as the rate it was
+    fitted at -- a biquad's shape near Nyquist comes partly from bilinear
+    warping, so the same Freq/Q/Gain draws a different curve at 44.1 than at 96.
+    A stock install pins this to [ 48000 ] and the question never arises, but
+    enabling more rates for bit-perfect playback is a common enough tweak that
+    guessing would be wrong exactly for the people most likely to notice.
+    """
+    try:
+        out = subprocess.run(["pw-metadata", "-n", "settings"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return tuple(default)
+    rates = []
+    for line in out.splitlines():
+        if "clock.allowed-rates" not in line:
+            continue
+        rates = [float(n) for n in re.findall(r"\d+", line.split("value:", 1)[-1])]
+    rates = [r for r in rates if 8000.0 <= r <= 768000.0]
+    return tuple(sorted(set(rates))) or tuple(default)
+
 
 def _pactl(*args):
     try:
@@ -41,12 +87,20 @@ def _pactl(*args):
 
 
 def _tag(name, kind, props):
-    """Short, stable, human-readable slug used in the EQ sink names."""
+    """Short, stable, human-readable slug used in the EQ sink names.
+
+    Stability matters more than brevity: the tag is baked into sink names, into
+    the state directory and into whatever the user bound to a key. Deriving the
+    bluetooth suffix from the profile keeps it the same across reconnects --
+    the old uniquing counter handed out bt8ae6 and bt8ae62 in whatever order
+    the two profiles happened to appear.
+    """
     if kind == "builtin":
         return "builtin"
     addr = props.get("api.bluez5.address", "")
     if addr:
-        return "bt" + addr.replace(":", "")[-4:].lower()
+        base = "bt" + addr.replace(":", "")[-4:].lower()
+        return base + BT_PROFILE_TAG.get(props.get("api.bluez5.profile", ""), "")
     if props.get("device.bus") == "usb":
         return "usb"
     slug = re.sub(r"[^a-z0-9]+", "", name.split(".")[0].lower())
@@ -78,6 +132,7 @@ def parse(text):
         if not d["name"] or OURS.match(d["name"]):
             continue                      # never treat our own sinks as devices
         p = d["props"]
+        bt_profile = p.get("api.bluez5.profile", "")
         ff = p.get("device.form_factor", "")
         kind = FORM_FACTOR_KIND.get(ff)
         if kind is None:
@@ -102,7 +157,8 @@ def parse(text):
             "tag": tag,
             "measurable": kind in MEASURABLE,
             "codec": p.get("api.bluez5.codec", ""),
-            "profile": p.get("api.bluez5.profile", ""),
+            "profile": bt_profile,
+            "narrowband": bt_profile in BT_NARROWBAND,
         })
     return devices
 
@@ -160,7 +216,8 @@ def main():
         for d in devs:
             print("\t".join([d["tag"], d["name"], d["kind"],
                              "1" if d["measurable"] else "0", d["description"],
-                             d["codec"]]))
+                             d["codec"], d["profile"],
+                             "1" if d["narrowband"] else "0"]))
     elif cmd == "active":
         a = active(devs)
         print(a["name"] if a else "")
@@ -169,11 +226,13 @@ def main():
         if not d:
             raise SystemExit("no such output device: %s" % (sys.argv[2:] or ""))
         print(d["name"])
+    elif cmd == "rates":
+        print(" ".join("%g" % r for r in allowed_rates()))
     elif cmd == "tag":
         d = find(devs, sys.argv[2])
         print(d["tag"] if d else "")
     else:
-        raise SystemExit("usage: devices.py {list|active|resolve|tag}")
+        raise SystemExit("usage: devices.py {list|active|resolve|tag|rates}")
 
 
 if __name__ == "__main__":

@@ -309,6 +309,27 @@ def render_args():
     return rows
 
 
+def remembered_rows():
+    """What each output will come up in, present or not.
+
+    Deliberately includes devices that are not currently connected: the point of
+    the memory is the headphones in the drawer, and a listing that hid them would
+    be hiding exactly the entries worth checking.
+    """
+    import devices as devmod
+    import prefs
+    present = {device_key(d["name"]): d for d in devmod.listing()}
+    rows = []
+    for key, entry in sorted(prefs.all_devices().items()):
+        dev = present.get(key)
+        profile = entry.get("profile") or "-"
+        how = "chosen" if entry.get("pinned") else "auto"
+        label = dev["description"] if dev else key
+        rows.append("%-10s %-8s %s%s" % (profile, how, label,
+                                         "" if dev else "   (not connected)"))
+    return rows or ["(nothing remembered yet)"]
+
+
 def devices_status():
     """One row per present device, plus whatever we know about it."""
     import devices as devmod
@@ -349,6 +370,8 @@ def main():
         print("\n".join(context(sys.argv[2] if len(sys.argv) > 2 else None)))
     elif cmd == "render-args":
         print("\n".join(render_args()))
+    elif cmd == "remembered":
+        print("\n".join(remembered_rows()))
     elif cmd == "devices":
         print("\n".join(devices_status()))
     elif cmd == "migrate":
@@ -356,8 +379,8 @@ def main():
             print("migrated: %s" % p)
     else:
         raise SystemExit(
-            "usage: state.py {path|dir|context|render-args|devices|add-run|"
-            "export|summary|analysis|migrate}")
+            "usage: state.py {path|dir|context|render-args|devices|"
+            "remembered|add-run|export|summary|analysis|migrate}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,40 @@
+#!/bin/bash
+# Pick an EQ profile for the current output, graphically.
+#
+# The menu file cannot list these: profiles are per-device and open-ended --
+# `flat` plus whatever was generated, imported or fetched, which for headphones
+# means keys like `sennheiser_hd_650`. Hardcoding four rows was fine when four
+# was all there could be. This asks the tool instead.
+set -euo pipefail
+
+command -v omarchy-eq >/dev/null || { notify-send "EQ" "omarchy-eq is not installed" 2>/dev/null; exit 1; }
+
+if ! rows=$(omarchy-eq ab list 2>/dev/null) || [[ -z $rows ]]; then
+  notify-send -t 4000 "EQ" "No profiles for this output yet -- run: omarchy-eq calibrate" 2>/dev/null || true
+  exit 1
+fi
+
+active=$(omarchy-eq ab status 2>/dev/null | sed -n 's/^active: //p')
+
+# `ab list` prints "  <key>  <description>". Mark the active one so the picker
+# shows what you are already on rather than making you remember.
+menu=$(awk -v active="$active" '
+  {
+    key = $1
+    $1 = ""
+    sub(/^ +/, "")
+    printf "%s%s\t%s\n", (key == active ? "* " : "  "), key, $0
+  }' <<<"$rows")
+
+if command -v gum >/dev/null; then
+  picked=$(gum choose --height 12 --header "EQ profile" <<<"$menu") || exit 0
+elif command -v fzf >/dev/null; then
+  picked=$(fzf --prompt "EQ profile > " --height 40% <<<"$menu") || exit 0
+else
+  notify-send "EQ" "Install gum or fzf to pick a profile from the menu" 2>/dev/null
+  exit 1
+fi
+
+[[ -n $picked ]] || exit 0
+key=$(awk '{print $1}' <<<"${picked#\* }")
+exec omarchy-eq ab "$key"

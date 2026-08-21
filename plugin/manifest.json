@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "jackzasian.eq",
+  "name": "Speaker EQ",
+  "version": "3.0.0",
+  "author": "jackzasian",
+  "license": "MIT",
+  "description": "Measured per-device PipeWire EQ: menu entries and a hotkey for omarchy-eq profile switching, automatic per-output switching, AutoEq preset fetch/import, the curve TUI, re-measurement and diagnostics.",
+  "kinds": [
+    "service"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "service": "Service.qml"
+  },
+  "omarchy": {
+    "homepage": "https://github.com/jackzasian/omarchy-eq"
+  }
+}
