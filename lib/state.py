@@ -191,6 +191,23 @@ def summary(data):
     return "\n".join(out)
 
 
+def analysis_lines(profiles_data):
+    """Clamp/note warnings from the last `generate`, as plain lines.
+
+    `generate` prints these once, to whatever terminal happened to run it --
+    easy to miss, and gone the moment that scrollback is lost. `doctor` reads
+    them back out of profiles.json so a clamped correction stays visible.
+    """
+    a = (profiles_data or {}).get("analysis") or {}
+    lines = ["note: %s" % n for n in a.get("notes", [])]
+    if a.get("pinned"):
+        lines.append(
+            "clamped: %s -- measurement is more extreme than this tool will "
+            "correct. Re-measure from a second position if you have not "
+            "already (omarchy-eq measure --again)." % ", ".join(a["pinned"]))
+    return lines
+
+
 # ---- migration --------------------------------------------------------------
 def migrate(sink, is_builtin=True):
     """One-shot move of the pre-schema files. Never clobbers newer state.
@@ -327,6 +344,8 @@ def main():
         print(export_txt(_read(sys.argv[2], {})))
     elif cmd == "summary":
         print(summary(_read(sys.argv[2], {})))
+    elif cmd == "analysis":
+        print("\n".join(analysis_lines(_read(sys.argv[2], {}))))
     elif cmd == "context":
         print("\n".join(context(sys.argv[2] if len(sys.argv) > 2 else None)))
     elif cmd == "render-args":
@@ -339,7 +358,7 @@ def main():
     else:
         raise SystemExit(
             "usage: state.py {path|dir|context|render-args|devices|add-run|"
-            "export|summary|migrate}")
+            "export|summary|analysis|migrate}")
 
 
 if __name__ == "__main__":

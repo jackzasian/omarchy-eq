@@ -233,8 +233,7 @@ def run(stdscr, exe, devname):
         elif k in (ord("c"), ord("g"), ord("a"), ord("d")):
             cmd = {"c": "calibrate", "g": "generate", "a": "apply", "d": "doctor"}[chr(k)]
             curses.endwin()
-            subprocess.run([exe, cmd, "--device", dev["tag"]]
-                           if cmd != "calibrate" else [exe, cmd, "--device", dev["tag"]])
+            subprocess.run([exe, cmd, "--device", dev["tag"]])
             input("\n  press Enter to return to the TUI ")
             stdscr.clear()
 

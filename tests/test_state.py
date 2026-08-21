@@ -138,6 +138,38 @@ class TestFloorLimited(unittest.TestCase):
         self.assertEqual([f for f, _ in state.floor_limited_points(data)], [80.0])
 
 
+class TestAnalysisLines(unittest.TestCase):
+    """Clamp/note warnings from `generate` must survive past its own terminal.
+
+    They are printed once at generate-time and then live only in
+    profiles.json -- `doctor` reads them back so a clamped correction stays
+    visible instead of being forgotten the moment the scrollback is gone.
+    """
+
+    def test_no_analysis_yields_no_lines(self):
+        self.assertEqual(state.analysis_lines({}), [])
+        self.assertEqual(state.analysis_lines({"analysis": {}}), [])
+
+    def test_notes_are_carried_through(self):
+        lines = state.analysis_lines(
+            {"analysis": {"notes": ["8k+ measured above midband: treated as "
+                                    "microphone resonance, HF shelf disabled"]}})
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("note: "))
+
+    def test_pinned_parameters_are_reported_together(self):
+        lines = state.analysis_lines(
+            {"analysis": {"pinned": ["resonance cut", "HF shelf"]}})
+        self.assertEqual(len(lines), 1)
+        self.assertIn("resonance cut, HF shelf", lines[0])
+        self.assertTrue(lines[0].startswith("clamped: "))
+
+    def test_notes_and_pinned_both_appear(self):
+        lines = state.analysis_lines(
+            {"analysis": {"notes": ["n1"], "pinned": ["highpass corner"]}})
+        self.assertEqual(len(lines), 2)
+
+
 class TestMigrationIsBuiltinOnly(unittest.TestCase):
     """Pre-v2 state was always a measurement of the laptop's own drivers.
 

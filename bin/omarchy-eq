@@ -592,6 +592,10 @@ cmd_doctor() {
   if state_for "" >/dev/null 2>&1 && [[ -f $RESPONSE ]]; then
     echo "active device measurement:"
     py state.py summary "$RESPONSE" | sed 's/^/  /'
+    if [[ -f $PROFILES ]]; then
+      local notes; notes=$(py state.py analysis "$PROFILES")
+      [[ -n $notes ]] && { echo "active device correction:"; printf '%s\n' "$notes" | sed 's/^/  /'; }
+    fi
   fi
   echo
   echo 'filter chains (each should target its own hardware sink):'
