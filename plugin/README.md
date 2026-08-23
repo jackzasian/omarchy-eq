@@ -34,6 +34,20 @@ Remove it with `plugin/uninstall.sh`, then `omarchy plugin remove jackzasian.eq`
 The uninstaller only deletes shims that are still byte-for-byte ours; anything
 you edited stays.
 
+### `--switcher`, and why it is not the default
+
+```bash
+~/.config/omarchy/plugins/jackzasian.eq/plugin/install.sh --switcher
+```
+
+That installs `~/.local/bin/omarchy-audio-output-switch`, which takes over a
+stock Omarchy command — a bigger thing to do to somebody's machine than adding
+an `omarchy-eq-*` shim, so it is opt-in and the installer says what it is for.
+You want it if `omarchy-eq doctor` tells you the output rotation is crowded by
+this plugin's sinks; see **Switching outputs, past the EQ sinks** in the main
+[README](../README.md). The choice is remembered, so re-running the installer
+later will not quietly add it or quietly drop it.
+
 ---
 
 ## How it works
@@ -101,6 +115,31 @@ The bar therefore reports **where the audio actually is**: whatever is playing,
 falling back to the default only when nothing is. The popup's *Playing through*
 section lists each application and its profile. That list is ground truth; check
 it first when something looks wrong.
+
+### How it stays current
+
+It waits for the change rather than asking for it. omarchy-eq rewrites
+`~/.local/state/omarchy-eq/changed` whenever the answer moves — a profile
+switch, an output switch, the watcher acting, routing moving a stream — and the
+panel watches that file.
+
+Before v3.1 it polled: `ab status`, `autoswitch status` and `route playing`
+every eight seconds forever, plus `ab list` every three while open. Four bash
+processes, each starting Python and shelling out to `pactl`, to answer four
+questions that share one snapshot of the audio graph. They are now one
+`omarchy-eq status --json` call, made when something actually changes, with a
+30-second poll left underneath as a floor — the signal file only ticks while
+something is running to write it, so a machine with auto-switching off still
+needs a way to notice a change made from a terminal.
+
+Asking once also removed a real inconsistency: a device could change between two
+of the four calls, and the popup would render a profile list belonging to a
+device the status line had already stopped describing.
+
+If the `omarchy-eq` on PATH is older than the plugin — they install separately,
+so that is a normal state to be in — the panel falls back to the four text
+commands permanently after the first failed call, rather than retrying a doomed
+process on every refresh.
 
 ---
 
@@ -214,13 +253,41 @@ Not installed automatically. Check the keys are free first:
 omarchy menu keybindings --print
 ```
 
-Then add to `~/.config/hypr/bindings.conf`:
+On Omarchy Quattro 4.x and newer, bindings are Lua — copy from
+[`hypr/bindings.lua.snippet`](hypr/bindings.lua.snippet). On older Omarchy, add
+to `~/.config/hypr/bindings.conf`:
 
 ```
 source = ~/.config/omarchy/plugins/jackzasian.eq/plugin/hypr/bindings.conf
 ```
 
-`Super+Alt+E` cycles profiles; `Super+Alt+Shift+E` opens the picker.
+`Super+Alt+E` cycles profiles; `Super+Alt+Shift+E` opens the picker;
+`Super+Alt+O` switches output.
+
+### Bind the output switcher by absolute path, never by name
+
+This one is worth reading before you spend an evening on it. Keybindings are
+dispatched by **quickshell** — `hyprctl binds` shows `dispatcher: __lua` — not
+by your shell and not by Hyprland, and the three have different PATHs:
+
+| Process | `/usr/share/omarchy/bin` | `~/bin` | `~/.local/bin` |
+|---|---|---|---|
+| interactive shell | #6 | #1 | #8 |
+| Hyprland | *absent* | #1 | #2 |
+| **quickshell** | **#1** | #2 | #3 |
+
+So a `~/.local/bin/omarchy-audio-output-switch` shim shadows the stock command
+in a terminal and **loses** to it on the keypress. The failure mode is that your
+fix appears to do nothing at all. Bind the path:
+
+```lua
+o.bind("SUPER + ALT + O", "Switch audio output",
+       os.getenv("HOME") .. "/.local/bin/omarchy-audio-output-switch")
+```
+
+Omarchy also binds the same command in `default/hypr/bindings/media.lua`, so
+`SHIFT + XF86AudioMute` needs `hl.unbind` before it can be rebound. The snippet
+does both.
 
 ---
 
@@ -269,6 +336,14 @@ what proves a fix; clearing `~/.cache/quickshell/qmlcache` is not enough.
 **The menu is missing the v3 rows.** Your menu file predates them and the
 installer will not overwrite it. Merge from
 `~/.config/omarchy/plugins/jackzasian.eq/plugin/menu/omarchy-eq.jsonc`.
+
+**Switching audio output does nothing, or keeps landing on the speakers.**
+This plugin is the cause. It publishes one sink per EQ profile, and the stock
+switcher rotates over sinks, so the built-in device can occupy most of the
+rotation; with auto-switching on, the watcher then undoes what movement there
+was. `omarchy-eq doctor` ends with an *output switcher* section that says
+whether this is happening. The fix is `install.sh --switcher` plus an
+absolute-path keybinding — and it must be the absolute path, see above.
 
 **Routing seems to do nothing.** Check ground truth first:
 

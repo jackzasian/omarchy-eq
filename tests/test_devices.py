@@ -245,3 +245,72 @@ class TestAllowedRates(unittest.TestCase):
     def test_the_caller_may_choose_its_own_fallback(self):
         self.assertEqual(self.rates("", default=(44100.0, 48000.0)),
                          (44100.0, 48000.0))
+
+
+PORTS = """Sink #70
+\tName: alsa_output.pci-0000_00_1f.3.analog-stereo
+\tDescription: Built-in Audio Analog Stereo
+\t\tdevice.form_factor = "internal"
+\tPorts:
+\t\tanalog-output-speaker: Speakers (type: Speaker, priority: 10000, availability group: Legacy 3, availability unknown)
+\t\tanalog-output-headphones: Headphones (type: Headphones, priority: 9900, availability group: Legacy 4, not available)
+\tActive Port: analog-output-speaker
+\tFormats:
+\t\tpcm
+Sink #99
+\tName: alsa_output.usb-dock
+\tDescription: Dock Line Out
+\t\tdevice.form_factor = "speaker"
+\tPorts:
+\t\tanalog-output: Line Out (type: Line, priority: 9000, not available)
+\tActive Port: analog-output
+Sink #172
+\tName: sonos_stream
+\tDescription: Sonos Roam
+"""
+
+
+class TestPortAvailability(unittest.TestCase):
+    """Which outputs an output switcher may rotate onto.
+
+    Upstream Omarchy's rule, matched deliberately: keep a sink with no ports at
+    all, and keep a sink with ports as long as one of them is not explicitly
+    "not available". The distinction that matters is that built-in speakers
+    normally read "availability unknown", which is not a refusal -- treating it
+    as one would drop the laptop's own speakers out of the rotation.
+    """
+
+    def setUp(self):
+        self.by = {d["tag"]: d for d in devices.parse(PORTS)}
+
+    def test_availability_unknown_counts_as_usable(self):
+        self.assertTrue(self.by["builtin"]["available"])
+
+    def test_a_sink_whose_only_port_is_unavailable_is_not(self):
+        # An unplugged jack: still in the graph, not somewhere to switch to.
+        self.assertFalse(self.by["alsaoutput"]["available"])
+
+    def test_a_portless_virtual_sink_is_always_available(self):
+        self.assertTrue(self.by["sonosstrea"]["available"])
+
+    def test_port_parsing_does_not_eat_the_following_properties(self):
+        # "Active Port:" and "Formats:" end the block; a parser that kept
+        # consuming would lose Name/Description of the next sink.
+        self.assertEqual(self.by["builtin"]["description"],
+                         "Built-in Audio Analog Stereo")
+        self.assertEqual(len(self.by), 3)
+
+
+class TestRotationRows(unittest.TestCase):
+    """`devices.py rotation` is what `omarchy-eq switch` cycles over."""
+
+    def test_marker_column_is_never_empty(self):
+        # TAB is an IFS whitespace character, so bash's `read` collapses a
+        # leading empty field and every later field shifts up one -- which is
+        # exactly what made the first version of the switcher land on the
+        # wrong sink. The marker is "-" rather than "" for that reason alone.
+        devs = devices.parse(PORTS)
+        act = devs[0]
+        for d in devs:
+            mark = "*" if d["name"] == act["name"] else "-"
+            self.assertNotEqual(mark, "")

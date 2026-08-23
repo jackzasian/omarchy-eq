@@ -27,4 +27,5 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
-          shellcheck bin/omarchy-eq install.sh omarchy/omarchy-eq-term
+          shellcheck bin/omarchy-eq install.sh omarchy/omarchy-eq-term \
+                     plugin/install.sh plugin/uninstall.sh plugin/bin/*

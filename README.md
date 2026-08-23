@@ -132,6 +132,39 @@ they get separate tags (`bt8ae6` and `bt8ae6hs`), separate measurements and
 separate EQ. Correcting the call profile with a curve derived from A2DP would
 be boosting treble the link never carries.
 
+## Switching outputs, past the EQ sinks
+
+```bash
+omarchy-eq switch            # next output
+omarchy-eq switch --prev
+omarchy-eq switch --to bt8ae6
+```
+
+This exists because of a problem this tool creates. Every profile is its own
+sink and they are all loaded at once — that is what makes switching gapless —
+so a desktop output switcher that rotates over **sinks** sees four entries for
+one pair of speakers. On a laptop with speakers, earbuds and a network sink,
+the built-in device can hold four of the six stops, and the outputs past it
+become hard to reach.
+
+With auto-switching on it is worse than awkward, it is a closed loop: a press
+advances to `eq_builtin_music`, the watcher puts the device back on its
+remembered profile two seconds later, and the next press starts over from
+`balanced`. The rotation never leaves the speakers, and nothing in the audio
+graph looks wrong while it happens.
+
+`omarchy-eq switch` rotates over **devices**. Sinks that are the same hardware
+collapse into one stop, and it lands directly on the profile that output already
+remembers — so the watcher has nothing to correct, and streams move once instead
+of twice. `omarchy-eq doctor` reports whether your switcher has this problem.
+
+Omarchy's own switcher does have a hook for a virtual sink sitting in front of
+real hardware: it skips whatever `omarchy-audio-tuning fronted-sink` names. But
+that is Omarchy's *own* speaker tuning, which reports `Installed: no` wherever
+omarchy-eq fills the role, so it exits 1 and nothing gets skipped.
+`omarchy-eq fronted-sinks` prints the same answer for our chains, one sink per
+line, for anything that wants to filter a sink list properly.
+
 ## Following the application, not just the device
 
 Auto-switching answers "what am I listening *through*". This answers "what am I
@@ -384,11 +417,19 @@ surrogate pair and a wrong one is easy to write and awkward to spot.
 ~/.local/state/omarchy-eq/devices/<sink>/response.previous.json   the last one
 ~/.local/state/omarchy-eq/devices/<sink>/ir/*.wav        imported impulse responses
 ~/.local/state/omarchy-eq/config.json                    remembered profile per device
+~/.local/state/omarchy-eq/changed                        change signal, see below
 ~/.config/omarchy-eq/chains.conf                         generated, do not edit
 ~/.config/systemd/user/omarchy-eq-chains.service         loads the chains
 ~/.config/systemd/user/omarchy-eq-autoswitch.service     the watcher
 ~/.cache/omarchy-eq/autoeq-index.md                      AutoEq catalogue, weekly
 ```
+
+`changed` holds a timestamp, rewritten whenever the answer to "what am I
+hearing" changes — a profile switch, an output switch, the watcher acting, or
+routing moving a stream. It is what lets the bar widget wait for an event
+instead of polling. It carries a timestamp rather than being an empty touch file
+because Quickshell's `FileView` watches file *contents*, and an mtime bump on an
+empty file is not reliably a change it re-reads.
 
 A new measurement keeps the one it replaces as `response.previous.json` — a
 sweep costs minutes, so nothing throws one away silently.

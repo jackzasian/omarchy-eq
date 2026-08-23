@@ -197,3 +197,86 @@ class TestCommaDecimalLocale(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDeviceFlagPosition(unittest.TestCase):
+    """`--device` has to work wherever it is written.
+
+    It did not. Most commands parsed flags in a `while/case` loop whose `*)`
+    arm broke out on the first non-flag, so the flag was only honoured *before*
+    the verb:
+
+        omarchy-eq ab status --device bt8ae6
+
+    parsed as the verb `status` followed by two stray words that nothing ever
+    looked at, and reported the profile of whichever output happened to be
+    active. No error -- just a confident answer about the wrong device. --help
+    has always documented the flag as working on every command, and a wrapper
+    script written against that documentation was silently reading the wrong
+    output's remembered profile.
+    """
+
+    def test_the_flag_is_extracted_before_any_command_parses_it(self):
+        with open(EXE) as fh:
+            body = fh.read()
+        # One place that knows how to spell it, rather than eight.
+        self.assertIn("take_device_flag() {", body)
+        self.assertEqual(body.count('need_val --device "${2:-}"'), 1)
+
+    def test_no_command_still_parses_device_in_its_own_loop(self):
+        # A per-command `--device)` arm is the shape that made position matter.
+        # take_device_flag's own arm is the one that is supposed to be there.
+        import re
+        with open(EXE) as fh:
+            body = fh.read()
+        start = body.index("take_device_flag() {")
+        end = body.index("\n}\n", start)
+        rest = body[:start] + body[end:]
+        stragglers = re.findall(r"^\s*--device\)", rest, re.M)
+        self.assertEqual(stragglers, [], "still parsed locally: %s" % stragglers)
+
+    def test_every_device_taking_command_calls_the_helper(self):
+        with open(EXE) as fh:
+            body = fh.read()
+        for cmd in ("cmd_ab", "cmd_measure", "cmd_calibrate", "cmd_generate",
+                    "cmd_export", "cmd_tui", "cmd_import", "cmd_fetch",
+                    "cmd_status", "cmd_switch"):
+            with self.subTest(cmd=cmd):
+                start = body.index("%s() {" % cmd)
+                end = body.index("\n}\n", start)
+                self.assertIn("take_device_flag", body[start:end])
+
+    def test_device_flag_is_accepted_after_the_verb(self):
+        # The regression itself, end to end. `generate` parses arguments before
+        # touching PipeWire, so this runs the same on a headless runner.
+        r = run("generate", "--device")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--device needs a value", r.stderr)
+
+    def test_equals_form_is_accepted(self):
+        r = run("generate", "--device=")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--device needs a value", r.stderr)
+
+
+class TestUnknownFlagsAreNotSwallowed(unittest.TestCase):
+    """A mistyped flag used to be ignored in silence.
+
+    `ab status --nonsense zzz` broke out of the flag loop on `status` and never
+    looked at the rest, so a typo in a script read as success. `import` was
+    worse: an unknown flag became the filename, and the failure came back as
+    "no such file: --bandz", pointing at the wrong thing entirely.
+    """
+
+    def test_import_rejects_an_unknown_flag_rather_than_taking_it_as_a_file(self):
+        r = run("import", "--bandz", "4")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unknown option", r.stderr)
+        self.assertNotIn("no such file", r.stderr)
+
+    def test_commands_taking_no_positionals_say_so(self):
+        for cmd in ("generate", "export", "tui"):
+            with self.subTest(cmd=cmd):
+                r = run(cmd, "stray-argument")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("usage:", r.stderr)
