@@ -1249,7 +1249,8 @@ cmd_switch() {
     # chose flat here" -- which suppresses the preference order in
     # autoswitch.choose and stops auto-setup ever fetching a preset for an
     # output the user has never expressed an opinion about.
-    local key="${target#eq_${tags[$n]}_}"
+    local prefix="eq_${tags[$n]}_" key
+    key="${target#"$prefix"}"
     [[ $key != "$target" ]] &&
       py prefs.py remember "${names[$n]}" "$key" 0 2>/dev/null
   fi
@@ -1490,8 +1491,8 @@ doctor_output_switcher() {
   if [[ $bound == aware ]]; then
     printf '  desktop switcher    : %s \033[32m(custom, EQ-aware)\033[0m\n' "$which_sw"
     printf '  Not the stock one and it already knows about omarchy-eq, so the\n'
-    printf '  rotation is presumably handled. `omarchy-eq switch` does the same\n'
-    printf '  thing if you would rather not maintain your own.\n'
+    printf '  rotation is presumably handled. omarchy-eq switch does the same\n'
+    printf '  thing, if you would rather not maintain your own.\n'
     return 0
   fi
 
