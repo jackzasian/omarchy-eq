@@ -18,9 +18,21 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINDIR="$HOME/.local/bin"
 MENU="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc"
 MARKER="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-eq/plugin.wired"
+SWITCHER_MARKER="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-eq/plugin.switcher"
 WIRE_ONLY=0
+WANT_SWITCHER=0
 
-[[ ${1:-} == --wire-only ]] && WIRE_ONLY=1
+for arg in "$@"; do
+  case "$arg" in
+    --wire-only) WIRE_ONLY=1 ;;
+    --switcher)  WANT_SWITCHER=1 ;;
+    *) echo "usage: install.sh [--switcher] [--wire-only]" >&2; exit 2 ;;
+  esac
+done
+
+# Re-asserting on later runs must not quietly *add* the switcher to someone who
+# never asked for it, so the choice is remembered rather than re-decided.
+[[ -f $SWITCHER_MARKER ]] && WANT_SWITCHER=1
 
 say() { (( WIRE_ONLY )) || printf '%s\n' "$*"; }
 
@@ -40,12 +52,32 @@ command -v omarchy-eq >/dev/null || {
 mkdir -p "$BINDIR"
 changed=0
 for f in "$HERE"/bin/*; do
-  dest="$BINDIR/$(basename "$f")"
+  base="$(basename "$f")"
+  dest="$BINDIR/$base"
+  # Every other shim here is an omarchy-eq-* name that belongs to this plugin.
+  # This one takes over a stock Omarchy command, which is a different kind of
+  # change to make to somebody's machine -- so it is opt-in, and said out loud.
+  if [[ $base == omarchy-audio-output-switch ]] && (( ! WANT_SWITCHER )); then
+    continue
+  fi
   if [[ ! -f $dest ]] || ! cmp -s "$f" "$dest"; then
     install -m 0755 "$f" "$dest"; changed=1
     say "installed: $dest"
   fi
 done
+
+if (( WANT_SWITCHER )); then
+  mkdir -p "$(dirname "$SWITCHER_MARKER")"; : > "$SWITCHER_MARKER"
+elif (( ! WIRE_ONLY )); then
+  say ""
+  say "Not installed (add --switcher if you want it):"
+  say "    $BINDIR/omarchy-audio-output-switch"
+  say ""
+  say "  Omarchy's output switcher rotates over PipeWire sinks, and this plugin"
+  say "  publishes one sink per EQ profile -- so the built-in speakers can hold"
+  say "  most of the rotation and the switcher never reaches your headphones."
+  say "  'omarchy-eq doctor' says whether that is happening to you."
+fi
 
 # The terminal shim ships with omarchy-eq proper, not with the plugin. Without
 # it the rows that need a TTY (measure, fetch, the TUI) have nothing to open.
@@ -86,8 +118,16 @@ Speaker EQ is wired.
   omarchy-eq-profile                  pick a profile for the current output
 
 Optional hotkeys -- check the keys are free first with
-'omarchy menu keybindings --print', then add to ~/.config/hypr/bindings.conf:
+'omarchy menu keybindings --print'.
+
+  Omarchy Quattro 4.x and newer (~/.config/hypr/bindings.lua):
+    see $HERE/hypr/bindings.lua.snippet
+  Older Omarchy (~/.config/hypr/bindings.conf):
     source = $HERE/hypr/bindings.conf
+
+  Bind the output switcher by ABSOLUTE PATH, never by name: keybindings are
+  dispatched by quickshell, whose PATH puts /usr/share/omarchy/bin ahead of
+  ~/.local/bin, so a shim works in a terminal and not on the keypress.
 
 Remove everything again with:  $HERE/uninstall.sh
 TXT

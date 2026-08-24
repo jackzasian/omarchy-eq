@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "jackzasian.eq",
   "name": "Speaker EQ",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "author": "jackzasian",
   "license": "MIT",
-  "description": "Measured per-device PipeWire EQ: menu entries and a hotkey for omarchy-eq profile switching, automatic per-output switching, AutoEq preset fetch/import, the curve TUI, re-measurement and diagnostics.",
+  "description": "Measured per-device PipeWire EQ: a bar item and menu entries for omarchy-eq profile switching, automatic per-output switching, a device-based audio output switcher that is not confused by the per-profile sinks, AutoEq preset fetch/import, the curve TUI, re-measurement and diagnostics.",
   "kinds": [
     "bar-widget",
     "service"

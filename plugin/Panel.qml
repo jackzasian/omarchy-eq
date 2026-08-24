@@ -23,6 +23,18 @@ Panel {
   property var streams: []
   property bool haveTool: true
 
+  // omarchy-eq and this plugin are installed separately, so an older tool on
+  // PATH is a normal state to be in rather than a broken one. `status --json`
+  // arrived in 3.1; when it is not there, or answers with something that is not
+  // the document we expect, fall back to the four text commands permanently
+  // rather than re-testing on every refresh.
+  property bool useJson: true
+
+  readonly property string home: Quickshell.env("HOME") || ""
+  readonly property string changedPath:
+    (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state")
+    + "/omarchy-eq/changed"
+
   readonly property string barText: Model.barLabel(root.status.active, root.streams)
   readonly property string heroSubtitle: {
     if (!root.haveTool) return "omarchy-eq is not installed"
@@ -42,10 +54,34 @@ Panel {
   property bool cursorActive: false
 
   function refresh() {
+    if (root.useJson) {
+      if (!jsonProc.running) jsonProc.running = true
+      return
+    }
     if (!statusProc.running) statusProc.running = true
     if (!autoProc.running) autoProc.running = true
     if (!playingProc.running) playingProc.running = true
     if (opened && !listProc.running) listProc.running = true
+  }
+
+  function applyStatusJson(text) {
+    var d = Model.parseStatusJson(text)
+    if (!d) {
+      // Not the document we expect. Say so once, switch to the text commands
+      // and stop trying -- an every-refresh retry would spawn a doomed process
+      // forever, which is the cost this whole change exists to remove.
+      root.useJson = false
+      console.log("jackzasian.eq: omarchy-eq status --json unavailable,"
+                  + " falling back to the text commands")
+      root.refresh()
+      return
+    }
+    root.status = d.status
+    root.profiles = d.profiles
+    root.streams = d.streams
+    root.autoswitchOn = d.autoswitch
+    root.haveTool = true
+    root.clampCursor()
   }
 
   function setProfile(key) {
@@ -80,6 +116,27 @@ Panel {
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  // The one process the bar normally runs. Everything below it is the
+  // pre-3.1 fallback path and stays idle unless useJson goes false.
+  Process {
+    id: jsonProc
+    command: ["omarchy-eq", "status", "--json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (String(text).trim() === "") {
+          // No output at all means the command does not exist, which is a
+          // different failure from bad output: the tool may be missing
+          // entirely, and the fallback path is what can tell those apart.
+          root.useJson = false
+          root.refresh()
+          return
+        }
+        root.applyStatusJson(text)
+      }
+    }
+  }
 
   Process {
     id: statusProc
@@ -120,19 +177,36 @@ Panel {
     }
   }
 
-  // Slow poll while closed: the label only has to be right, not instant. With
-  // auto-switching on, the profile can change without anyone touching the bar.
+  // omarchy-eq bumps this file whenever the answer changes -- a profile switch,
+  // an output switch, the watcher acting, or routing moving a stream. Waiting
+  // on it replaced a three-process poll every eight seconds, and it updates on
+  // the event rather than up to eight seconds after it.
+  FileView {
+    id: changedFile
+    path: root.changedPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.refresh()
+    onFileChanged: reload()
+  }
+
+  // The signal file only ticks while something is running to write it, so a
+  // machine with auto-switching off and nothing routing would never hear about
+  // a change made from a terminal. This is the floor under that, not the
+  // mechanism -- hence 30s rather than the 8s it replaces.
   Timer {
-    interval: 8000
+    interval: 30000
     running: true
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
   }
 
+  // While the popup is open the panel is being looked at, so a change made
+  // elsewhere should land promptly even on the fallback path.
   Timer {
-    interval: 3000
-    running: root.opened
+    interval: 5000
+    running: root.opened && !root.useJson
     repeat: true
     onTriggered: root.refresh()
   }

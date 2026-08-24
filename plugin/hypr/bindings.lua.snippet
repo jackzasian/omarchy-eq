@@ -1,0 +1,31 @@
+-- Add to ~/.config/hypr/bindings.lua  (Omarchy Quattro 4.x and newer, where the
+-- Hyprland config was ported to Lua. On older Omarchy use bindings.conf here.)
+--
+-- Check the keys are free first:  omarchy menu keybindings --print
+--
+-- WHY ABSOLUTE PATHS. Keybindings are dispatched by quickshell, not by your
+-- shell and not by Hyprland (`hyprctl binds` shows `dispatcher: __lua`), and
+-- quickshell's PATH puts /usr/share/omarchy/bin FIRST -- ahead of ~/.local/bin.
+-- So a ~/.local/bin shim named omarchy-audio-output-switch wins in a terminal
+-- and loses on the keypress, and the fix looks like it did nothing. Bind the
+-- path, not the name. o.bind hands the string to hl.dsp.exec_cmd, which takes
+-- an absolute path fine.
+--
+-- Replace HOME below with your own home directory; Lua here has no expansion.
+
+local eq_switch = os.getenv("HOME") .. "/.local/bin/omarchy-audio-output-switch"
+
+-- Cycle the audio OUTPUT, skipping omarchy-eq's per-profile sinks so the
+-- rotation can actually reach headphones and network sinks.
+hl.unbind("SUPER + ALT + O")
+o.bind("SUPER + ALT + O", "Switch audio output", eq_switch)
+
+-- Omarchy binds the same command in default/hypr/bindings/media.lua, so this
+-- one has to be unbound before it can be rebound.
+hl.unbind("SHIFT + XF86AudioMute")
+o.bind("SHIFT + XF86AudioMute", "Switch audio output", eq_switch, { locked = true })
+
+-- Cycle EQ profiles on the current output. Safe to leave on the bare name:
+-- omarchy-eq is not an omarchy-* command that /usr/share/omarchy/bin shadows.
+o.bind("SUPER + ALT + E", "Cycle speaker EQ", "omarchy-eq ab")
+o.bind("SUPER + ALT + SHIFT + E", "Pick speaker EQ profile", "omarchy-eq-profile")

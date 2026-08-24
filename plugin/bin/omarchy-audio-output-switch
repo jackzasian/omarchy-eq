@@ -1,0 +1,38 @@
+#!/bin/bash
+# Switch to the next audio *output*, past omarchy-eq's per-profile sinks.
+#
+# Omarchy's own switcher rotates over PipeWire sinks. omarchy-eq publishes one
+# sink per EQ profile per device, all loaded at once -- that is what makes
+# switching gapless -- so the built-in speakers can hold four of six rotation
+# slots and the rotation never reaches the headphones. Worse, with the
+# autoswitch watcher running it is a closed loop: a press advances to
+# eq_builtin_music, the watcher puts the device back on its remembered profile
+# about two seconds later, and the next press starts over.
+#
+# Upstream anticipates a virtual sink in front of real hardware and skips the
+# one named by `omarchy-audio-tuning fronted-sink` -- but that is Omarchy's own
+# speaker tuning, which reports "Installed: no" wherever omarchy-eq fills the
+# role, so it exits 1 and nothing is skipped.
+#
+# `omarchy-eq switch` rotates over devices instead and lands directly on the
+# profile the device already remembers, so the watcher has nothing to correct.
+#
+# NOTE ON INSTALLING THIS: shadowing the name on PATH fixes it in a terminal and
+# does nothing for the keybinding. Keybindings dispatch through quickshell,
+# which puts /usr/share/omarchy/bin ahead of ~/.local/bin -- see plugin/README.md.
+# Bind the absolute path.
+set -uo pipefail
+
+# Better a working stock switcher than none -- but by absolute path. This file
+# is installed *as* omarchy-audio-output-switch on PATH, so calling it by name
+# here would re-exec this script forever.
+if ! command -v omarchy-eq >/dev/null; then
+  for stock in /usr/share/omarchy/bin /usr/bin /usr/local/bin; do
+    [[ -x $stock/omarchy-audio-output-switch ]] &&
+      exec "$stock/omarchy-audio-output-switch" "$@"
+  done
+  command -v notify-send >/dev/null &&
+    notify-send "Audio" "omarchy-eq is not installed" 2>/dev/null
+  exit 1
+fi
+exec omarchy-eq switch "$@"

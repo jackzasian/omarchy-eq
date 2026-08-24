@@ -1,6 +1,6 @@
 # Maintainer: jackzasian <jack.zhengzexi@gmail.com>
 pkgname=omarchy-eq
-pkgver=3.0.0
+pkgver=3.1.0
 pkgrel=1
 pkgdesc="Per-device PipeWire EQ: measure your speakers, import AutoEq headphone presets, and switch profiles automatically as outputs change"
 arch=('any')

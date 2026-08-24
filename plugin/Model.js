@@ -6,6 +6,48 @@
 // Everything here reads `omarchy-eq`'s own output rather than its state files.
 // The files are JSON and would be easier to parse, but they are private layout
 // that has already changed once; the CLI's output is the part with users.
+//
+// The panel asks `omarchy-eq status --json` once and parses it with
+// parseStatusJson. The four text parsers below it are the fallback for when the
+// omarchy-eq on PATH is older than this plugin -- the two are installed
+// separately, so that combination is a normal thing to be in, not a bug. They
+// are otherwise unused.
+
+// `omarchy-eq status --json`: one document, one process, everything the panel
+// needs. Returns null when the output is not the JSON we expect, which is the
+// signal to fall back to the text commands.
+function parseStatusJson(raw) {
+    if (!raw)
+        return null
+    var d
+    try {
+        d = JSON.parse(String(raw))
+    } catch (e) {
+        return null
+    }
+    if (!d || typeof d !== "object" || d.error || !d.device)
+        return null
+    var profiles = []
+    var src = d.profiles || []
+    for (var i = 0; i < src.length; i++)
+        profiles.push({ key: src[i].key, description: src[i].description || "" })
+    var streams = []
+    var ss = d.streams || []
+    for (var j = 0; j < ss.length; j++)
+        streams.push({ app: ss[j].app, profile: ss[j].profile,
+                       playing: !!ss[j].playing })
+    return {
+        status: {
+            active: d.active || "",
+            device: d.device.label || "",
+            tag: d.device.tag || "",
+            remembered: d.remembered || ""
+        },
+        profiles: profiles,
+        streams: streams,
+        autoswitch: !!d.autoswitch
+    }
+}
 
 // `omarchy-eq ab list` prints two columns:
 //     flat        no EQ - raw output (reference)

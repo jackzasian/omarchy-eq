@@ -107,16 +107,38 @@ def _tag(name, kind, props):
     return (slug or "dev")[:10]
 
 
+def _blank():
+    return {"name": "", "description": "", "props": {},
+            "ports": 0, "ports_usable": 0}
+
+
 def parse(text):
     """Parse `pactl list sinks` into device dicts."""
-    out, cur = [], None
+    out, cur, in_ports = [], None, False
     for raw in text.splitlines():
         line = raw.strip()
         if line.startswith("Sink #"):
             if cur:
                 out.append(cur)
-            cur = {"name": "", "description": "", "props": {}}
+            cur, in_ports = _blank(), False
         elif cur is not None:
+            if line == "Ports:":
+                in_ports = True
+                continue
+            # The port block runs until the next unindented key. Every port line
+            # is "<name>: <label> (… , availability …)", so the closing paren is
+            # what tells a port from the "Active Port:"/"Formats:" that end it.
+            if in_ports:
+                if line.endswith(")") and ": " in line:
+                    cur["ports"] += 1
+                    # Upstream's rule, and the one that matters: a port is
+                    # usable unless PulseAudio says outright that it is not.
+                    # "availability unknown" is the normal reading for built-in
+                    # speakers and must count as usable.
+                    if not line.endswith("not available)"):
+                        cur["ports_usable"] += 1
+                    continue
+                in_ports = False
             if line.startswith("Name:"):
                 cur["name"] = line.split(":", 1)[1].strip()
             elif line.startswith("Description:"):
@@ -159,6 +181,11 @@ def parse(text):
             "codec": p.get("api.bluez5.codec", ""),
             "profile": bt_profile,
             "narrowband": bt_profile in BT_NARROWBAND,
+            # A sink with no ports at all is a virtual one (Sonos, a null sink)
+            # and is always selectable. A sink with ports is only selectable
+            # while at least one of them is plugged in -- otherwise the output
+            # rotation would stop on a headphone jack with nothing in it.
+            "available": d["ports"] == 0 or d["ports_usable"] > 0,
         })
     return devices
 
@@ -231,8 +258,25 @@ def main():
     elif cmd == "tag":
         d = find(devs, sys.argv[2])
         print(d["tag"] if d else "")
+    elif cmd == "rotation":
+        # What `omarchy-eq switch` cycles through: one row per physical output,
+        # in graph order, unselectable ones dropped. This is a separate verb
+        # rather than a column on `list` because the two answer different
+        # questions -- `list` is "what outputs exist", including the headphone
+        # jack you are not using, and this is "what can I switch to right now".
+        act = active(devs)
+        for d in devs:
+            if not d["available"]:
+                continue
+            # The marker column is never empty: TAB is an IFS whitespace
+            # character, so a leading empty field is swallowed by bash's `read`
+            # and every later field shifts up one.
+            print("\t".join([
+                "*" if act and d["name"] == act["name"] else "-",
+                d["tag"], d["name"], d["description"]]))
     else:
-        raise SystemExit("usage: devices.py {list|active|resolve|tag|rates}")
+        raise SystemExit(
+            "usage: devices.py {list|active|resolve|tag|rates|rotation}")
 
 
 if __name__ == "__main__":

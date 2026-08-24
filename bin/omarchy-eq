@@ -3,7 +3,7 @@
 # and A/B the results live. See README.md.
 set -uo pipefail
 
-VERSION="3.0.0"
+VERSION="3.1.0"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(dirname "$(dirname "$SELF")")"
 LIB="$ROOT/lib"
@@ -39,6 +39,13 @@ MIC_CONF="$CONFD/98-omarchy-mic.conf"
 # machine. Auto-switching is only tolerable because of this.
 EQ_DIR="$XDG_CONF/omarchy-eq"
 CHAINS_CONF="$EQ_DIR/chains.conf"
+# Bumped whenever the answer to "what am I hearing" changes, so the bar widget
+# can wait for an event instead of asking three times every eight seconds. The
+# content is a timestamp rather than an empty touch because Quickshell's
+# FileView watches file *contents*: an mtime bump on an empty file is not
+# reliably a change it will re-read.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-eq"
+CHANGED="$STATE_DIR/changed"
 UNIT_DIR="$XDG_CONF/systemd/user"
 CHAINS_UNIT="omarchy-eq-chains.service"
 WATCH_UNIT="omarchy-eq-autoswitch.service"
@@ -63,6 +70,38 @@ need() { command -v "$1" >/dev/null || die "missing required command: $1"; }
 need_val() { # flag value [hint]
   [[ -n ${2:-} ]] || die "$1 needs a value${3:+ -- $3}"
 }
+# --device may appear anywhere in a command's arguments, which is what --help
+# has always claimed. It did not: most commands parsed flags in a loop that
+# broke on the first non-flag, so `ab status --device bt8ae6` parsed as the verb
+# `status` followed by two stray words, and acted on the *current* output. No
+# error, just an answer about the wrong device -- and `ab list --device X` would
+# cheerfully print another device's profiles.
+#
+# So the flag is pulled out of the vector before any command looks at it, and
+# there is exactly one place that knows how to spell it. Callers read DEV_SPEC
+# and then `set -- "${ARGV[@]}"` to carry on with what is left, in order.
+DEV_SPEC=""
+ARGV=()
+take_device_flag() {
+  DEV_SPEC=""; ARGV=()
+  while (( $# )); do
+    case "$1" in
+      --device)   need_val --device "${2:-}" "see: omarchy-eq devices"
+                  DEV_SPEC="$2"; shift ;;
+      --device=*) DEV_SPEC="${1#--device=}"
+                  [[ -n $DEV_SPEC ]] || \
+                    die "--device needs a value -- see: omarchy-eq devices" ;;
+      *)          ARGV+=("$1") ;;
+    esac
+    shift
+  done
+}
+# Callers restore what is left with the idiom below. `set --` cannot be wrapped
+# in a function -- it would only rebind that function's own arguments -- and the
+# ${ARGV[@]+...} guard is there because bash before 4.4 treats "${ARGV[@]}" on an
+# empty array as an unbound variable under `set -u`.
+#
+#     take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
 # pactl fails with "Connection refused" when XDG_RUNTIME_DIR is unset (e.g. a
 # sanitised env). Without this guard `ab` would silently read an empty default
 # sink, decide the current profile is unknown, and jump to the first profile
@@ -79,6 +118,13 @@ py() { local s="$1"; shift; python3 "$LIB/$s" "$@"; }
 have_systemd() { systemctl --user show-environment >/dev/null 2>&1; }
 
 sink_exists() { pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "$1"; }
+# Never fatal: a bar that misses a refresh is a cosmetic problem, and failing a
+# profile switch because a state directory was read-only would not be.
+signal_change() {
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  date +%s%N >"$CHANGED" 2>/dev/null || true
+  return 0
+}
 
 # Wait for a named sink to be published. Loading a chain is asynchronous, and
 # the caller's very next act is to make it the default.
@@ -205,6 +251,7 @@ switch_to() { # sink
   while read -r id _ client _; do
     [[ -n $id && $client != "-" ]] && pactl move-sink-input "$id" "$1" >/dev/null 2>&1
   done < <(pactl list short sink-inputs 2>/dev/null)
+  signal_change
   return 0
 }
 
@@ -352,13 +399,13 @@ restore_audio() {
 # ---- commands ---------------------------------------------------------------
 cmd_measure() {
   need pactl; need pw-play; need pw-record; need python3; need_pa
-  local again=0 fast=0 position="" assume_yes=0 spec=""
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  local again=0 fast=0 position="" assume_yes=0
   while (( $# )); do
     case "$1" in
       --again)    again=1 ;;
       --fast)     fast=1 ;;
       --yes|-y)   assume_yes=1 ;;
-      --device)   need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift ;;
       --position) need_val --position "${2:-}"; position="$2"; shift ;;
       *) die "usage: omarchy-eq measure [--again] [--fast] [--yes] [--device D] [--position NAME]" ;;
     esac
@@ -367,7 +414,7 @@ cmd_measure() {
   (( fast )) && REPEATS=1
 
   local sink source
-  state_for "$spec"
+  state_for "$DEV_SPEC"
   sink="$DEV_NAME"
   # Measuring plays a tone and records it on the laptop's microphone. That only
   # means something when the sound is in the room and arrives promptly.
@@ -514,11 +561,12 @@ play_music() {
 
 cmd_calibrate() {
   need pactl; need pw-play; need pw-record; need python3; need_pa
-  local music=auto fast=() spec="" dev=()
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  local music=auto fast=() spec="$DEV_SPEC" dev=()
+  [[ -n $spec ]] && dev=(--device "$spec")
   while (( $# )); do
     case "$1" in
       --play)   need_val --play "${2:-}" "a file, or 'none'"; music="$2"; shift ;;
-      --device) need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; dev=(--device "$2"); shift ;;
       --fast)   fast=(--fast) ;;
       *) die "usage: omarchy-eq calibrate [--device D] [--play FILE|none] [--fast]" ;;
     esac
@@ -578,8 +626,9 @@ EOF
 }
 
 cmd_generate() {
-  local spec=""; [[ ${1:-} == --device ]] && { need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift 2; }
-  state_for "$spec"
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  (( $# )) && die "usage: omarchy-eq generate [--device D]"
+  state_for "$DEV_SPEC"
   [[ -f $RESPONSE ]] || die "no measurement found -- run: omarchy-eq measure"
   py generate.py "$RESPONSE" "$PROFILES" || die "generation failed"
   info "written: $PROFILES"
@@ -682,8 +731,9 @@ cmd_devices() {
 }
 
 cmd_export() {
-  local spec=""; [[ ${1:-} == --device ]] && { need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift 2; }
-  state_for "$spec"
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  (( $# )) && die "usage: omarchy-eq export [--device D]"
+  state_for "$DEV_SPEC"
   [[ -f $RESPONSE ]] || die "no measurement found -- run: omarchy-eq measure"
   py state.py export "$RESPONSE"
 }
@@ -721,19 +771,29 @@ cmd_mic() {
 
 cmd_ab() {
   need_pa
-  local spec="" auto=0
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  local auto=0
   while (( $# )); do
     case "$1" in
-      --device) need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift ;;
       # Set by the watcher. The switch is identical; only the bookkeeping
       # differs -- a profile the watcher landed on is recorded unpinned, so a
       # later auto-setup may still replace it, while your own choice may not.
-      --auto)   auto=1 ;;
+      --auto) auto=1 ;;
+      # An unknown flag used to fall through to `break` and be ignored in
+      # silence, so a typo in a script read as success. A profile name is never
+      # spelled with a leading dash, so this cannot shadow a real one.
+      -*) die "unknown option '$1'
+       usage: omarchy-eq ab [list|status|<profile>] [--device D]" ;;
       *) break ;;
     esac
     shift
   done
-  state_for "$spec"
+  # `ab` takes one verb or profile name and nothing else, so anything past the
+  # first word is a mistake. Without this, `ab status --nonsense zzz` broke out
+  # of the loop on `status` and never looked at the rest.
+  (( $# > 1 )) && die "unexpected argument '$2'
+       usage: omarchy-eq ab [list|status|<profile>] [--device D]"
+  state_for "$DEV_SPEC"
   if (( ! ${#PROFILE_KEYS[@]} )); then
     if [[ $DEV_MEASURABLE == 1 ]]; then
       die "'$DEV_LABEL' has no EQ profiles yet -- run: omarchy-eq calibrate"
@@ -793,25 +853,30 @@ cmd_ab() {
 
 cmd_tui() {
   need python3
-  local spec=""; [[ ${1:-} == --device ]] && { need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift 2; }
-  state_for "$spec"
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  (( $# )) && die "usage: omarchy-eq tui [--device D]"
+  state_for "$DEV_SPEC"
   py tui.py "$SELF" "$DEV_NAME"
 }
 
 cmd_import() {
-  local spec="" file="" name="" bands="" rates=""
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  local file="" name="" bands="" rates=""
   while (( $# )); do
     case "$1" in
-      --device) need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift ;;
       --bands)  need_val --bands "${2:-}" "how many filters to fit a GraphicEQ curve onto"; bands="$2"; shift ;;
       --rates)  need_val --rates "${2:-}" "comma-separated, e.g. 44100,48000"; rates="$2"; shift ;;
+      # Without this an unknown flag became the filename, and the failure came
+      # back as "no such file: --bandz" pointing at the wrong thing.
+      -*) die "unknown option '$1'
+       usage: omarchy-eq import <file> [name] [--device D] [--bands N] [--rates R]" ;;
       *) if [[ -z $file ]]; then file="$1"; else name="$1"; fi ;;
     esac
     shift
   done
   [[ -n $file ]] || die "usage: omarchy-eq import <file> [name] [--device D] [--bands N]"
   [[ -f $file ]] || die "no such file: $file"
-  state_for "$spec"
+  state_for "$DEV_SPEC"
   info "device : $DEV_LABEL"
   local extra=()
   [[ -n $bands ]] && extra+=(--bands "$bands")
@@ -1031,7 +1096,187 @@ route_once() { # [--verbose]
       (( verbose )) && info "$app -> ${target#eq_*_} ($why)"
     fi
   done < <(py routing.py plan)
+  # Routing changes what you are hearing without touching the default sink, so
+  # switch_to never runs and nothing else would tell the bar. This is precisely
+  # the case a bar reading the default sink was blind to.
+  (( moved )) && signal_change
   return 0
+}
+
+# Everything the bar widget needs, in one process instead of four. See
+# lib/status.py for why that mattered enough to add a command for it.
+#
+# Deliberately --json only: `ab status` and `doctor` already answer this for a
+# human, and a third spelling of the same thing is a third thing to keep
+# consistent with the other two.
+cmd_status() {
+  need_pa
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  local json=0
+  while (( $# )); do
+    case "$1" in
+      --json) json=1 ;;
+      -*) die "unknown option '$1' -- usage: omarchy-eq status --json [--device D]" ;;
+      *)  die "unexpected argument '$1' -- usage: omarchy-eq status --json [--device D]" ;;
+    esac
+    shift
+  done
+  (( json )) || die "usage: omarchy-eq status --json [--device D]
+       For a human-readable summary use 'omarchy-eq ab status' or 'omarchy-eq doctor'."
+  py status.py "$DEV_SPEC"
+}
+
+# ---- output switching -------------------------------------------------------
+# Every EQ profile is its own PipeWire sink, all loaded at once -- that is what
+# makes switching gapless and per-app routing possible, and it is not going to
+# change. The cost is that a desktop output switcher which rotates over *sinks*
+# sees four entries for one pair of speakers and never reaches the headphones.
+# Omarchy's does exactly that; its escape hatch is `omarchy-audio-tuning
+# fronted-sink`, which only knows about Omarchy's own tuning and exits 1 here.
+#
+# So rotate over devices instead. devices.py already collapses the graph to one
+# row per physical output -- it drops every eq_* sink by construction and
+# resolves the current default back through ours -- which is the whole problem,
+# already solved, in a module that has tests.
+
+# The sink to land on for a device: the profile it already remembers, so the
+# autoswitch watcher has nothing to correct two seconds later. Falls back to the
+# raw device when it has no profiles, or when the remembered chain is not loaded.
+target_sink_for() { # tag name
+  local tag="$1" name="$2" key sink
+  key=$(py prefs.py remembered "$name" 2>/dev/null) || key=""
+  [[ -n $key && $key != flat ]] || { printf '%s\n' "$name"; return; }
+  sink="eq_${tag}_${key}"
+  if sink_exists "$sink"; then printf '%s\n' "$sink"; else printf '%s\n' "$name"; fi
+}
+
+# A chain sink sits at a fixed 100% while the real level lives on the hardware
+# beneath it, so an OSD that read the chain would contradict the volume keys.
+# Omarchy ships the resolver; without it, fall back to the device itself.
+effective_sink_for() { # sink device-name
+  local out
+  if command -v omarchy-audio-output-sink >/dev/null; then
+    out=$(omarchy-audio-output-sink "$1" 2>/dev/null)
+    # It can succeed and print nothing when the chain is idle and unlinked, so
+    # test the answer rather than the exit status.
+    [[ -n $out ]] && { printf '%s\n' "$out"; return; }
+  fi
+  printf '%s\n' "$2"
+}
+
+switch_osd() { # sink device-name description
+  local vol muted state
+  local eff; eff=$(effective_sink_for "$1" "$2")
+  vol=$(pactl get-sink-volume "$eff" 2>/dev/null |
+    awk 'NR == 1 {for (i = 1; i <= NF; i++) if ($i ~ /%$/) {sub("%", "", $i); print $i; exit}}')
+  [[ -n $vol ]] || vol=0
+  muted=$(pactl get-sink-mute "$eff" 2>/dev/null)
+  if [[ $muted == *yes ]] || (( vol == 0 )); then state=muted
+  elif (( vol <= 33 )); then state=low
+  elif (( vol <= 66 )); then state=medium
+  else state=high
+  fi
+  if command -v omarchy-osd >/dev/null; then
+    omarchy-osd -i "volume-${state}" -m "$3" 2>/dev/null && return 0
+  fi
+  command -v notify-send >/dev/null &&
+    notify-send -t 1500 "Output" "$3" 2>/dev/null
+  return 0
+}
+
+cmd_switch() {
+  need_pa
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  local dir=next want="$DEV_SPEC" quiet=0 dry=0
+  while (( $# )); do
+    case "$1" in
+      --next)  dir=next ;;
+      --prev)  dir=prev ;;
+      --to)    need_val --to "${2:-}" "see: omarchy-eq devices"; want="$2"; shift ;;
+      --quiet) quiet=1 ;;
+      # Says where it would go and touches nothing. This is how the rotation is
+      # tested -- the alternative is a test that moves the machine's audio.
+      --dry-run) dry=1 ;;
+      -*) die "unknown option '$1'
+       usage: omarchy-eq switch [--next|--prev|--to D] [--dry-run] [--quiet]" ;;
+      *) want="$1" ;;
+    esac
+    shift
+  done
+
+  local -a tags=() names=() descs=()
+  local cur=-1 mark tag name desc
+  while IFS=$'\t' read -r mark tag name desc; do
+    [[ -n $tag ]] || continue
+    [[ $mark == '*' ]] && cur=${#tags[@]}
+    tags+=("$tag"); names+=("$name"); descs+=("$desc")
+  done < <(py devices.py rotation)
+
+  (( ${#tags[@]} )) || die "no selectable audio outputs"
+  if (( ${#tags[@]} == 1 )) && [[ -z $want ]]; then
+    (( quiet )) || info "only one output: ${descs[0]}"
+    return 0
+  fi
+
+  local n
+  if [[ -n $want ]]; then
+    # Resolve through devices.py so a tag, a sink name or a description
+    # substring all work, exactly as --device does everywhere else.
+    local resolved; resolved=$(py devices.py resolve "$want" 2>/dev/null) ||
+      die "no such output: $want -- see: omarchy-eq devices"
+    n=-1
+    local i
+    for i in "${!names[@]}"; do [[ ${names[$i]} == "$resolved" ]] && { n=$i; break; }; done
+    (( n >= 0 )) || die "'$want' is not selectable right now (unplugged?)"
+  elif [[ $dir == prev ]]; then
+    n=$(( (cur - 1 + ${#tags[@]}) % ${#tags[@]} ))
+  else
+    n=$(( (cur + 1) % ${#tags[@]} ))
+  fi
+
+  local target; target=$(target_sink_for "${tags[$n]}" "${names[$n]}")
+  if (( dry )); then
+    printf '%s\t%s\t%s\n' "${tags[$n]}" "$target" "${descs[$n]}"
+    return 0
+  fi
+  if [[ $target != "$(pactl get-default-sink 2>/dev/null)" ]]; then
+    switch_to "$target"
+    # Record it the same way `ab` does, so the watcher reads this as a choice
+    # already made rather than a default sink it needs to correct.
+    #
+    # Only when we actually landed on a profile. Landing on the raw device
+    # means it has none, and writing `flat` there would read back as "you last
+    # chose flat here" -- which suppresses the preference order in
+    # autoswitch.choose and stops auto-setup ever fetching a preset for an
+    # output the user has never expressed an opinion about.
+    local prefix="eq_${tags[$n]}_" key
+    key="${target#"$prefix"}"
+    [[ $key != "$target" ]] &&
+      py prefs.py remember "${names[$n]}" "$key" 0 2>/dev/null
+  fi
+  (( quiet )) || switch_osd "$target" "${names[$n]}" "${descs[$n]}"
+  (( quiet )) || printf '%s\n' "${descs[$n]}"
+}
+
+# The physical sinks an EQ chain sits in front of, one per line.
+#
+# This is the integration point a desktop output switcher needs: Omarchy's
+# skips the single sink named by `omarchy-audio-tuning fronted-sink`, which is
+# its own tuning system and knows nothing about ours. Anything that filters a
+# sink list can pipe this through and stop offering outputs that are really the
+# same speakers heard through a different curve.
+cmd_fronted_sinks() {
+  need_pa
+  local sinks tag name
+  sinks=$(pactl list short sinks 2>/dev/null)
+  while IFS=$'\t' read -r _ tag name _; do
+    [[ -n $name ]] || continue
+    # A device is "fronted" only while at least one of its chains is actually
+    # loaded. A profile that exists on disk but was never applied -- the device
+    # was disconnected when apply last ran -- fronts nothing.
+    awk -v t="eq_${tag}_" 'index($2, t) == 1 {found = 1} END {exit !found}' \
+      <<<"$sinks" && printf '%s\n' "$name"
+  done < <(py devices.py rotation)
 }
 
 cmd_route() {
@@ -1086,19 +1331,23 @@ cmd_route() {
 # ---- AutoEQ database --------------------------------------------------------
 cmd_fetch() {
   need python3
-  local spec="" query="" fmt="parametric" bands="" yes=0 want=""
+  take_device_flag "$@"; set -- "${ARGV[@]+"${ARGV[@]}"}"
+  local query="" fmt="parametric" bands="" yes=0 want=""
   while (( $# )); do
     case "$1" in
-      --device) need_val --device "${2:-}" "see: omarchy-eq devices"; spec="$2"; shift ;;
       --format) need_val --format "${2:-}" "parametric|graphic|fixedband|convolution"; fmt="$2"; shift ;;
       --bands)  need_val --bands "${2:-}"; bands="$2"; shift ;;
       --pick)   need_val --pick "${2:-}" "the number of a result"; want="$2"; shift ;;
       --yes|-y) yes=1 ;;
+      # A stray flag would otherwise be folded into the search query, which then
+      # matches nothing for a reason no message explains.
+      -*) die "unknown option '$1'
+       usage: omarchy-eq fetch [model...] [--device D] [--format F] [--pick N]" ;;
       *) query="${query:+$query }$1" ;;
     esac
     shift
   done
-  state_for "$spec"
+  state_for "$DEV_SPEC"
   # No query: use the device's own name. That is the case worth optimising --
   # you plugged something in and want the EQ for it.
   [[ -n $query ]] || { query="$DEV_LABEL"; info "searching for: $query"; }
@@ -1200,6 +1449,72 @@ cmd_doctor() {
     [[ $client == "-" ]] || continue
     printf '  %-5s -> %s\n' "$id" "$(pactl list short sinks | awk -v d="$sink2" '$1==d{print $2}')"
   done
+  echo
+  doctor_output_switcher
+}
+
+# Whether a desktop output switcher can still reach every output.
+#
+# This is the check that would have saved a long debugging session. The symptom
+# is entirely non-obvious: pressing "switch audio output" appears to do nothing,
+# or lands on the speakers again, because our per-profile sinks crowd the
+# rotation and the autoswitch watcher undoes what little movement there was.
+# Nothing in the audio graph looks wrong while it happens.
+doctor_output_switcher() {
+  local total eqs devs
+  total=$(pactl list short sinks 2>/dev/null | wc -l)
+  eqs=$(pactl list short sinks 2>/dev/null | awk '$2 ~ /^eq_/' | wc -l)
+  devs=$(py devices.py rotation 2>/dev/null | wc -l)
+
+  echo 'output switcher:'
+  printf '  sinks in the graph  : %s  (%s of them ours)\n' "$total" "$eqs"
+  printf '  real outputs        : %s\n' "$devs"
+
+  local bound="" which_sw
+  which_sw=$(command -v omarchy-audio-output-switch 2>/dev/null) || which_sw=""
+  if [[ -z $which_sw ]]; then
+    printf '  desktop switcher    : not installed (nothing to do)\n'
+    return 0
+  fi
+  # Ours execs `omarchy-eq switch`. A switcher that mentions omarchy-eq some
+  # other way is somebody's own wrapper -- it already knows about us, so saying
+  # "this is broken" would be wrong. Only a switcher that has never heard of
+  # omarchy-eq is the one with the problem.
+  if grep -q 'omarchy-eq switch' "$which_sw" 2>/dev/null; then
+    bound=ours
+  elif grep -q 'omarchy-eq' "$which_sw" 2>/dev/null; then
+    bound=aware
+  else
+    bound=stock
+  fi
+
+  if [[ $bound == aware ]]; then
+    printf '  desktop switcher    : %s \033[32m(custom, EQ-aware)\033[0m\n' "$which_sw"
+    printf '  Not the stock one and it already knows about omarchy-eq, so the\n'
+    printf '  rotation is presumably handled. omarchy-eq switch does the same\n'
+    printf '  thing, if you would rather not maintain your own.\n'
+    return 0
+  fi
+
+  if [[ $bound == ours ]]; then
+    printf '  desktop switcher    : %s \033[32m(device-based)\033[0m\n' "$which_sw"
+    printf '  keybinding          : must call this by ABSOLUTE PATH -- quickshell\n'
+    printf '                        searches /usr/share/omarchy/bin before ~/.local/bin,\n'
+    printf '                        so a PATH shim works in a terminal and not on the key.\n'
+    return 0
+  fi
+
+  printf '  desktop switcher    : %s (stock, rotates over sinks)\n' "$which_sw"
+  if (( eqs > 0 && devs > 1 )); then
+    printf '  \033[33mThe stock switcher rotates over sinks, so %s of its %s stops are the\n' \
+      "$eqs" "$total"
+    printf '  same speakers on different EQ profiles, and outputs past them are hard\n'
+    printf '  or impossible to reach. Use the device-based one instead:\n'
+    printf '      omarchy-eq switch\033[0m\n'
+  else
+    printf '  (harmless here: nothing to crowd the rotation yet)\n'
+  fi
+  return 0
 }
 
 cmd_reset() {
@@ -1230,6 +1545,7 @@ omarchy-eq $VERSION -- measure, correct and A/B your speakers, per output device
   omarchy-eq ab [profile]       switch profile live (no arg = cycle)
   omarchy-eq ab list|status     show profiles / what is active
   omarchy-eq active             the profile you are actually hearing, one word
+  omarchy-eq switch             next output device (not the next EQ sink)
   omarchy-eq tui                curve + profile switcher in the terminal
 
   omarchy-eq autoswitch enable  follow the output device automatically
@@ -1269,6 +1585,9 @@ case "${1:-help}" in
   generate) shift; cmd_generate "$@" ;;
   apply)    shift; cmd_apply "$@" ;;
   ab)       shift; cmd_ab "$@" ;;
+  status)   shift; cmd_status "$@" ;;
+  switch)   shift; cmd_switch "$@" ;;
+  fronted-sinks) shift; cmd_fronted_sinks "$@" ;;
   tui)      shift; cmd_tui "$@" ;;
   import)   shift; cmd_import "$@" ;;
   fetch)    shift; cmd_fetch "$@" ;;
